@@ -95,6 +95,30 @@ public sealed class SevenZipRunner
             throw new InvalidOperationException($"Распаковка не удалась (код {exit}).\n{stderr}");
     }
 
+    /// <summary>Creates (or updates) an archive from the given files/folders.</summary>
+    public async Task CreateAsync(
+        string archivePath,
+        IEnumerable<string> sources,
+        string format = "7z",
+        int level = 5,
+        string? password = null)
+    {
+        var args = new List<string> { "a", $"-t{format}", $"-mx={level}", "-y", "-sccUTF-8" };
+        if (!string.IsNullOrEmpty(password))
+        {
+            args.Add($"-p{password}");
+            if (format.Equals("7z", StringComparison.OrdinalIgnoreCase))
+                args.Add("-mhe=on"); // encrypt headers (7z only)
+        }
+        args.Add(archivePath);
+        args.Add("--"); // stop switch parsing; everything after is a path
+        foreach (var s in sources) args.Add(s);
+
+        var (exit, _, stderr) = await RunAsync(args.ToArray());
+        if (exit != 0)
+            throw new InvalidOperationException($"Не удалось создать архив (код {exit}).\n{stderr}");
+    }
+
     private async Task<(int exit, string stdout, string stderr)> RunAsync(params string[] args)
     {
         if (!EngineAvailable)

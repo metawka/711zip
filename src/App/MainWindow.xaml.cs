@@ -257,6 +257,79 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    // ---------- Compress ----------
+
+    private async void OnCompress(object sender, RoutedEventArgs e)
+    {
+        if (_currentDir is null) return;
+        var sources = FileList.SelectedItems.OfType<FileItem>()
+            .Where(i => i.Kind != ItemKind.UpDir).Select(i => i.FullPath).ToList();
+        if (sources.Count == 0) { await ShowError("Нечего сжимать", "Выберите файлы или папки."); return; }
+
+        var defaultName = sources.Count == 1
+            ? Path.GetFileNameWithoutExtension(sources[0]) is var n && n.Length > 0 ? n : Path.GetFileName(sources[0])
+            : new DirectoryInfo(_currentDir).Name;
+
+        var opts = await AskCompressOptionsAsync(defaultName);
+        if (opts is null) return;
+
+        var (name, format, level, password) = opts.Value;
+        var archivePath = Path.Combine(_currentDir, $"{name}.{format}");
+
+        SetBusy(true);
+        try
+        {
+            await _engine.CreateAsync(archivePath, sources, format, level, password);
+            SetBusy(false);
+            NavigateToFolder(_currentDir, pushHistory: false);
+            await ShowInfo("Готово", $"Создан архив:\n{archivePath}");
+        }
+        catch (Exception ex)
+        {
+            SetBusy(false);
+            await ShowError("Ошибка сжатия", ex.Message);
+        }
+    }
+
+    private async Task<(string name, string format, int level, string? password)?> AskCompressOptionsAsync(string defaultName)
+    {
+        var nameBox = new TextBox { Text = defaultName, Header = "Имя архива" };
+        var formatBox = new ComboBox { Header = "Формат", SelectedIndex = 0, HorizontalAlignment = HorizontalAlignment.Stretch };
+        formatBox.Items.Add("7z");
+        formatBox.Items.Add("zip");
+        var levelBox = new ComboBox { Header = "Уровень сжатия", SelectedIndex = 2, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var levels = new (string label, int value)[]
+        {
+            ("Без сжатия", 0), ("Быстрый", 1), ("Обычный", 5), ("Максимальный", 7), ("Ультра", 9)
+        };
+        foreach (var l in levels) levelBox.Items.Add(l.label);
+        var passBox = new PasswordBox { Header = "Пароль (необязательно)", PlaceholderText = "оставьте пустым — без пароля" };
+
+        var panel = new StackPanel { Spacing = 12, MinWidth = 320 };
+        panel.Children.Add(nameBox);
+        panel.Children.Add(formatBox);
+        panel.Children.Add(levelBox);
+        panel.Children.Add(passBox);
+
+        var dlg = new ContentDialog
+        {
+            Title = "Создать архив",
+            Content = panel,
+            PrimaryButtonText = "Создать",
+            CloseButtonText = "Отмена",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RootGrid.XamlRoot,
+        };
+
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return null;
+
+        var name = string.IsNullOrWhiteSpace(nameBox.Text) ? defaultName : nameBox.Text.Trim();
+        var format = (string)formatBox.SelectedItem;
+        var level = levels[levelBox.SelectedIndex].value;
+        var password = string.IsNullOrEmpty(passBox.Password) ? null : passBox.Password;
+        return (name, format, level, password);
+    }
+
     // ---------- Helpers ----------
 
     private static bool IsArchive(string name) => ArchiveExts.Contains(Path.GetExtension(name));
@@ -279,6 +352,10 @@ public sealed partial class MainWindow : Window
         bool canExtract = _openArchive is not null
             || FileList.SelectedItems.OfType<FileItem>().Any(i => i.Kind == ItemKind.Archive);
         ExtractButton.IsEnabled = canExtract && _engine.EngineAvailable;
+
+        bool canCompress = _openArchive is null
+            && FileList.SelectedItems.OfType<FileItem>().Any(i => i.Kind != ItemKind.UpDir);
+        CompressButton.IsEnabled = canCompress && _engine.EngineAvailable;
     }
 
     private void SetBusy(bool busy) => Busy.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
