@@ -4,6 +4,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -38,6 +39,10 @@ public sealed partial class MainWindow : Window
         this.ExtendsContentIntoTitleBar = true;
         this.SetTitleBar(AppTitleBar);
         this.Title = "711zip";
+
+        // Never keep the window pinned above others.
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+            presenter.IsAlwaysOnTop = false;
 
         FileList.SelectionChanged += (_, _) => UpdateCommandState();
 
