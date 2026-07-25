@@ -1,0 +1,21 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+.vs/
+
+# dotnet publish / dist artifacts
+dist/
+publish/
+*.msix
+*.appx
+
+# Large upstream downloads — re-fetch with tools/fetch-engine.ps1
+vendor/*.7z
+vendor/*.exe
+vendor/7zip/
+vendor/7zip-src/
+
+# Keep the bundled engine so the app builds out-of-the-box:
+!vendor/engine-x64/

@@ -1,0 +1,23 @@
+711zip — Windows 11–style front end for 7-Zip
+Copyright (C) 2026 metawka
+
+SPDX-License-Identifier: LGPL-2.1-or-later
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU Lesser General Public License as published by the Free
+Software Foundation; either version 2.1 of the License, or (at your option)
+any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Lesser General Public License for more details.
+
+The full text of the GNU Lesser General Public License, version 2.1, is
+available at: https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt
+
+----------------------------------------------------------------------------
+
+This product bundles the 7-Zip engine (7z.dll), Copyright (C) 1999-2026
+Igor Pavlov, which is distributed under its own terms (LGPL with the unRAR
+license restriction, plus some BSD-licensed portions). Those terms are
+reproduced in LICENSE-7zip.txt and must be retained in any redistribution.
