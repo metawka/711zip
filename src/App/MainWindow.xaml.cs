@@ -82,11 +82,12 @@ public sealed partial class MainWindow : Window
         OpenFromCommandLine();
 
         if (!_settings.GuideShown)
-            DispatcherQueue.TryEnqueue(async () =>
+            RootGrid.Loaded += async (_, _) =>
             {
-                await Onboarding.ShowAsync(RootGrid.XamlRoot);
+                if (_settings.GuideShown || RootGrid.XamlRoot is null) return;
                 _settings.GuideShown = true; _settings.Save();
-            });
+                await Onboarding.ShowAsync(RootGrid.XamlRoot);
+            };
     }
 
     private void AddAccel(VirtualKey key, VirtualKeyModifiers mods, TypedEventHandler<KeyboardAccelerator, KeyboardAcceleratorInvokedEventArgs> handler)

@@ -13,6 +13,18 @@ public partial class App : Application
     public App()
     {
         this.InitializeComponent();
+        this.UnhandledException += (_, e) =>
+        {
+            try
+            {
+                var log = System.IO.Path.Combine(
+                    System.Environment.GetFolderPath(System.Environment.SpecialFolder.ApplicationData),
+                    "711zip", "crash.log");
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(log)!);
+                System.IO.File.AppendAllText(log, System.DateTime.Now + "\n" + e.Exception + "\n\n");
+            }
+            catch { }
+        };
     }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
