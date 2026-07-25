@@ -1,4 +1,4 @@
-# 711zip
+# 711-zip
 
 A modern **Windows 11–style** front end for the [7-Zip](https://www.7-zip.org/) archiver.
 
