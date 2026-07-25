@@ -119,6 +119,43 @@ public sealed class SevenZipRunner
             throw new InvalidOperationException($"Не удалось создать архив (код {exit}).\n{stderr}");
     }
 
+    /// <summary>Tests archive integrity (7z t). Returns the tool's report text.</summary>
+    public async Task<(bool ok, string report)> TestAsync(string archivePath, string? password = null)
+    {
+        var args = new List<string> { "t", archivePath, "-sccUTF-8" };
+        if (!string.IsNullOrEmpty(password)) args.Add($"-p{password}");
+        var (exit, stdout, stderr) = await RunAsync(args.ToArray());
+        return (exit == 0, exit == 0 ? stdout : stdout + stderr);
+    }
+
+    /// <summary>Adds files/folders into an existing archive; format is inferred from its extension.</summary>
+    public async Task AddAsync(string archivePath, IEnumerable<string> sources)
+    {
+        var args = new List<string> { "a", "-y", "-sccUTF-8", archivePath, "--" };
+        foreach (var s in sources) args.Add(s);
+        var (exit, _, stderr) = await RunAsync(args.ToArray());
+        if (exit != 0)
+            throw new InvalidOperationException($"Не удалось добавить в архив (код {exit}).\n{stderr}");
+    }
+
+    /// <summary>Renames an entry inside an archive (7z rn old new).</summary>
+    public async Task RenameEntryAsync(string archivePath, string oldPath, string newPath)
+    {
+        var (exit, _, stderr) = await RunAsync("rn", archivePath, "-y", "-sccUTF-8", oldPath, newPath);
+        if (exit != 0)
+            throw new InvalidOperationException($"Не удалось переименовать в архиве (код {exit}).\n{stderr}");
+    }
+
+    /// <summary>Deletes entries from an archive (7z d).</summary>
+    public async Task DeleteEntriesAsync(string archivePath, IEnumerable<string> entryPaths)
+    {
+        var args = new List<string> { "d", archivePath, "-y", "-sccUTF-8", "--" };
+        foreach (var p in entryPaths) args.Add(p);
+        var (exit, _, stderr) = await RunAsync(args.ToArray());
+        if (exit != 0)
+            throw new InvalidOperationException($"Не удалось удалить из архива (код {exit}).\n{stderr}");
+    }
+
     private async Task<(int exit, string stdout, string stderr)> RunAsync(params string[] args)
     {
         if (!EngineAvailable)

@@ -17,6 +17,7 @@
     <Description>Windows 11-style front end for 7-Zip</Description>
     <Copyright>Copyright (C) 2026 metawka</Copyright>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <Platform>x64</Platform>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -40,6 +41,11 @@
   <ItemGroup>
     <None Include="..\..\vendor\engine-x64\7z.dll" Link="engine\7z.dll" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\vendor\engine-x64\7z.exe" Link="engine\7z.exe" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- App icon available at runtime for the window/taskbar -->
+  <ItemGroup>
+    <Content Include="Assets\app.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
