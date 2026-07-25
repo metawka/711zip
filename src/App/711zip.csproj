@@ -32,7 +32,8 @@
 
   <!-- Bundle the 7-Zip engine next to the app -->
   <ItemGroup>
-    <None Include="..\..\vendor\engine-x64\7z.dll" Link="7z.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\vendor\engine-x64\7z.dll" Link="engine\7z.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\vendor\engine-x64\7z.exe" Link="engine\7z.exe" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
