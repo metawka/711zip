@@ -53,7 +53,7 @@ public sealed partial class MainWindow : Window
         this.SystemBackdrop = new MicaBackdrop();
         this.ExtendsContentIntoTitleBar = true;
         this.SetTitleBar(AppTitleBar);
-        this.Title = "711zip";
+        this.Title = "711-zip";
         SetWindowIcon();
 
         if (AppWindow.Presenter is OverlappedPresenter presenter)
@@ -79,7 +79,25 @@ public sealed partial class MainWindow : Window
     private void OpenFromCommandLine()
     {
         var args = Environment.GetCommandLineArgs();
-        if (args.Length > 1)
+
+        // "Добавить в архив" Explorer verb: --compress <path> [<path> ...]
+        if (args.Length >= 3 && args[1] == "--compress")
+        {
+            var sources = args.Skip(2).Where(p => File.Exists(p) || Directory.Exists(p)).ToList();
+            var dir = sources.Count > 0 ? Path.GetDirectoryName(sources[0].TrimEnd('\\')) : null;
+            if (dir is not null && Directory.Exists(dir))
+            {
+                NavigateToFolder(dir, pushHistory: false);
+                var set = new HashSet<string>(sources.Select(s => s.TrimEnd('\\')), StringComparer.OrdinalIgnoreCase);
+                FileList.SelectedItems.Clear();
+                foreach (var it in Items.Where(i => set.Contains(i.FullPath.TrimEnd('\\'))))
+                    FileList.SelectedItems.Add(it);
+                DispatcherQueue.TryEnqueue(() => OnCompress(this, null!));
+                return;
+            }
+        }
+
+        if (args.Length > 1 && !args[1].StartsWith("--"))
         {
             var target = args[1];
             if (Directory.Exists(target)) { NavigateToFolder(target, pushHistory: false); return; }
@@ -90,6 +108,14 @@ public sealed partial class MainWindow : Window
                 if (dir is not null) { NavigateToFolder(dir, pushHistory: false); return; }
             }
         }
+
+        // Reopen the last folder, like the original 7-Zip file manager.
+        if (!string.IsNullOrEmpty(_settings.LastPath) && Directory.Exists(_settings.LastPath))
+        {
+            NavigateToFolder(_settings.LastPath, pushHistory: false);
+            return;
+        }
+
         ShowDrives(pushHistory: false);
     }
 
@@ -113,8 +139,41 @@ public sealed partial class MainWindow : Window
     private void ApplyTheme(ElementTheme theme)
     {
         RootGrid.RequestedTheme = theme;
-        int glyph = RootGrid.ActualTheme == ElementTheme.Dark ? 0xE706 : 0xE708;
+        bool dark = RootGrid.ActualTheme == ElementTheme.Dark;
+        int glyph = dark ? 0xE706 : 0xE708;
         ThemeGlyph.Glyph = char.ConvertFromUtf32(glyph);
+        ApplyCaptionColors(dark);
+    }
+
+    // Custom title bars leave the min/max/close glyphs at their default colours,
+    // which wash out on a light Mica background. Paint them by theme.
+    private void ApplyCaptionColors(bool dark)
+    {
+        var tb = AppWindow.TitleBar;
+        var fg = dark ? Windows.UI.Color.FromArgb(255, 255, 255, 255) : Windows.UI.Color.FromArgb(255, 32, 32, 32);
+        var fgInactive = dark ? Windows.UI.Color.FromArgb(255, 155, 155, 155) : Windows.UI.Color.FromArgb(255, 130, 130, 130);
+        var hover = dark ? Windows.UI.Color.FromArgb(30, 255, 255, 255) : Windows.UI.Color.FromArgb(25, 0, 0, 0);
+        var pressed = dark ? Windows.UI.Color.FromArgb(50, 255, 255, 255) : Windows.UI.Color.FromArgb(45, 0, 0, 0);
+        tb.ButtonForegroundColor = fg;
+        tb.ButtonInactiveForegroundColor = fgInactive;
+        tb.ButtonHoverForegroundColor = fg;
+        tb.ButtonPressedForegroundColor = fg;
+        tb.ButtonBackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+        tb.ButtonInactiveBackgroundColor = Windows.UI.Color.FromArgb(0, 0, 0, 0);
+        tb.ButtonHoverBackgroundColor = hover;
+        tb.ButtonPressedBackgroundColor = pressed;
+    }
+
+    // ---------- Column resize ----------
+
+    private void OnSizeThumbDrag(object sender, DragDeltaEventArgs e)
+    {
+        if (App.Cols is { } c) c.Size -= e.HorizontalChange;
+    }
+
+    private void OnModifiedThumbDrag(object sender, DragDeltaEventArgs e)
+    {
+        if (App.Cols is { } c) c.Modified -= e.HorizontalChange;
     }
 
     // ---------- Navigation ----------
@@ -197,6 +256,8 @@ public sealed partial class MainWindow : Window
             PathBox.Text = dir.FullName;
             SetStatus($"Элементов: {Items.Count - 1}");
             UpdateCommandState();
+
+            if (_settings.LastPath != dir.FullName) { _settings.LastPath = dir.FullName; _settings.Save(); }
         }
         catch (Exception ex)
         {
@@ -348,17 +409,56 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void OnPathKeyDown(object sender, KeyRoutedEventArgs e)
+    private void OnPathTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
-        if (e.Key != VirtualKey.Enter) return;
-        e.Handled = true;
-        var text = PathBox.Text.Trim().Trim('"');
+        if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
+        sender.ItemsSource = SuggestPaths(sender.Text);
+    }
+
+    private void OnPathSuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+    {
+        if (args.SelectedItem is string s) sender.Text = s;
+    }
+
+    private void OnPathQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+    {
+        var text = (args.ChosenSuggestion as string ?? sender.Text ?? "").Trim().Trim('"');
         if (string.IsNullOrEmpty(text)) return;
         if (text is "Этот компьютер" or "Избранное") { ShowDrives(); return; }
         if (Directory.Exists(text)) { NavigateToFolder(text); return; }
         if (File.Exists(text) && IsArchive(text)) { _ = OpenArchiveAsync(text); return; }
         if (File.Exists(text)) { LaunchPath(text); return; }
         _ = ShowError("Путь не найден", $"Не удалось перейти:\n{text}");
+    }
+
+    // Live folder suggestions as the user types a path (e.g. "C:\" -> C:\Users, ...).
+    private static List<string> SuggestPaths(string text)
+    {
+        var result = new List<string>();
+        try
+        {
+            if (string.IsNullOrWhiteSpace(text)) return result;
+            text = text.Trim().Trim('"');
+            string dir, prefix;
+            if (Directory.Exists(text) && (text.EndsWith('\\') || text.EndsWith('/')))
+            { dir = text; prefix = ""; }
+            else
+            {
+                dir = Path.GetDirectoryName(text) ?? "";
+                prefix = Path.GetFileName(text);
+            }
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return result;
+
+            foreach (var d in Directory.EnumerateDirectories(dir))
+            {
+                var name = Path.GetFileName(d);
+                if (prefix.Length == 0 || name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    result.Add(d);
+                if (result.Count >= 12) break;
+            }
+        }
+        catch { /* inaccessible path — just show nothing */ }
+        return result;
     }
 
     private void OnOpenFavorites(object sender, RoutedEventArgs e) => ShowFavorites();
@@ -434,7 +534,7 @@ public sealed partial class MainWindow : Window
         if (item.Kind == ItemKind.Archive)
             menu.Items.Add(Mi("Извлечь", 0xE8DE, (_, _) => OnExtract(this, null!)));
         if (item.Kind is ItemKind.File or ItemKind.Archive)
-            menu.Items.Add(Mi("Просмотр", 0xE890, (_, _) => LaunchPath(item.FullPath)));
+            menu.Items.Add(Mi("Просмотр", 0xE890, (_, _) => _ = PreviewPathAsync(item.FullPath, item.Name)));
 
         if (item.Kind != ItemKind.Drive)
         {
@@ -533,19 +633,21 @@ public sealed partial class MainWindow : Window
             ? Path.GetFileNameWithoutExtension(sources[0]) is var n && n.Length > 0 ? n : Path.GetFileName(sources[0])
             : new DirectoryInfo(_currentDir).Name;
 
-        var opts = await AskCompressOptionsAsync(defaultName);
+        var opts = await AskCompressOptionsAsync(defaultName, _currentDir);
         if (opts is null) return;
 
-        var (name, format, level, password) = opts.Value;
-        var archivePath = Path.Combine(_currentDir, $"{name}.{format}");
+        var (name, format, level, password, destDir) = opts.Value;
+        var archivePath = Path.Combine(destDir, $"{name}.{format}");
 
         SetBusy(true);
         try
         {
+            Directory.CreateDirectory(destDir);
             await _engine.CreateAsync(archivePath, sources, format, level, password);
             _settings.DefaultFormat = format; _settings.DefaultLevel = level; _settings.Save();
             SetBusy(false);
-            NavigateToFolder(_currentDir, pushHistory: false);
+            if (string.Equals(destDir.TrimEnd('\\'), _currentDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                NavigateToFolder(_currentDir, pushHistory: false);
             await ShowInfo("Готово", $"Создан архив:\n{archivePath}");
         }
         catch (Exception ex)
@@ -555,7 +657,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async Task<(string name, string format, int level, string? password)?> AskCompressOptionsAsync(string defaultName)
+    private async Task<(string name, string format, int level, string? password, string destDir)?> AskCompressOptionsAsync(string defaultName, string defaultDir)
     {
         var nameBox = new TextBox { Text = defaultName, Header = "Имя архива" };
         var formatBox = new ComboBox { Header = "Формат", HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -569,15 +671,35 @@ public sealed partial class MainWindow : Window
         foreach (var l in levels) levelBox.Items.Add(l.label);
         levelBox.SelectedIndex = Math.Max(0, Array.FindIndex(levels, l => l.value == _settings.DefaultLevel));
         if (levelBox.SelectedIndex < 0) levelBox.SelectedIndex = 2;
-        var passBox = new PasswordBox { Header = "Пароль (необязательно)", PlaceholderText = "оставьте пустым — без пароля" };
+        var passBox = new PasswordBox { Header = "Пароль (необязательно)" };
 
-        var panel = new StackPanel { Spacing = 12, MinWidth = 320 };
+        // Destination folder: typed path + "Обзор…" folder picker.
+        var destBox = new TextBox { Text = defaultDir, HorizontalAlignment = HorizontalAlignment.Stretch };
+        var browseBtn = new Button { Content = "Обзор…", VerticalAlignment = VerticalAlignment.Bottom };
+        browseBtn.Click += async (_, _) =>
+        {
+            var picker = new Windows.Storage.Pickers.FolderPicker { SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.ComputerFolder };
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+            var folder = await picker.PickSingleFolderAsync();
+            if (folder is not null) destBox.Text = folder.Path;
+        };
+        var destRow = new Grid { ColumnSpacing = 8 };
+        destRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        destRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        Grid.SetColumn(destBox, 0); Grid.SetColumn(browseBtn, 1);
+        destRow.Children.Add(destBox); destRow.Children.Add(browseBtn);
+        var destPanel = new StackPanel { Spacing = 4 };
+        destPanel.Children.Add(new TextBlock { Text = "Куда сохранить", Style = (Style)Application.Current.Resources["CaptionTextBlockStyle"] });
+        destPanel.Children.Add(destRow);
+
+        var panel = new StackPanel { Spacing = 12, MinWidth = 360 };
         panel.Children.Add(nameBox); panel.Children.Add(formatBox);
-        panel.Children.Add(levelBox); panel.Children.Add(passBox);
+        panel.Children.Add(levelBox); panel.Children.Add(passBox); panel.Children.Add(destPanel);
 
         var dlg = new ContentDialog
         {
-            Title = "Создать архив", Content = panel,
+            Title = "Создать архив", Content = new ScrollViewer { Content = panel },
             PrimaryButtonText = "Создать", CloseButtonText = "Отмена",
             DefaultButton = ContentDialogButton.Primary, XamlRoot = RootGrid.XamlRoot,
         };
@@ -587,7 +709,8 @@ public sealed partial class MainWindow : Window
         var format = (string)formatBox.SelectedItem;
         var level = levels[levelBox.SelectedIndex].value;
         var password = string.IsNullOrEmpty(passBox.Password) ? null : passBox.Password;
-        return (name, format, level, password);
+        var destDir = string.IsNullOrWhiteSpace(destBox.Text) ? defaultDir : destBox.Text.Trim().Trim('"');
+        return (name, format, level, password, destDir);
     }
 
     // ---------- File operations ----------
@@ -793,6 +916,28 @@ public sealed partial class MainWindow : Window
         if (sel.Count == 0 || _view is View.Drives) { e.Cancel = true; return; }
 
         e.Data.RequestedOperation = DataPackageOperation.Copy;
+
+        // Real files (folder/favorites view) already exist on disk: hand them over
+        // synchronously so Explorer and the desktop recognise the drop target and
+        // show a clean file cursor instead of the ⊘ no-drop icon.
+        if (_view is View.Folder or View.Favorites)
+        {
+            try
+            {
+                var items = new List<IStorageItem>();
+                foreach (var i in sel)
+                {
+                    if (Directory.Exists(i.FullPath))
+                        items.Add(StorageFolder.GetFolderFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
+                    else if (File.Exists(i.FullPath))
+                        items.Add(StorageFile.GetFileFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
+                }
+                if (items.Count > 0) { e.Data.SetStorageItems(items, readOnly: false); return; }
+            }
+            catch { /* fall through to the deferred provider below */ }
+        }
+
+        // Archive entries have to be extracted first, so defer their production.
         e.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
         {
             var deferral = request.GetDeferral();
@@ -867,8 +1012,15 @@ public sealed partial class MainWindow : Window
             else if (_view == View.Folder && _currentDir is not null)
             {
                 var dest = _currentDir;
+                // Dropping items back onto the folder they already live in (e.g. you
+                // start a drag then release over the same list to cancel) must not
+                // duplicate them — skip anything already inside dest.
+                var incoming = paths.Where(p =>
+                    !string.Equals(Path.GetDirectoryName(p.TrimEnd('\\')), dest.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (incoming.Count == 0) return;
                 SetBusy(true);
-                await Task.Run(() => { foreach (var p in paths) ShellOps.CopyInto(p, dest); });
+                await Task.Run(() => { foreach (var p in incoming) ShellOps.CopyInto(p, dest); });
                 SetBusy(false);
                 NavigateToFolder(dest, pushHistory: false);
             }
@@ -886,6 +1038,7 @@ public sealed partial class MainWindow : Window
     private async Task ViewArchiveEntryAsync(FileItem item)
     {
         if (_openArchive is null) return;
+        if (item.Kind == ItemKind.Archive) { await OpenArchiveNestedAsync(item); return; }
         try
         {
             var temp = Path.Combine(Path.GetTempPath(), "711zip_view", Guid.NewGuid().ToString("N"));
@@ -893,9 +1046,95 @@ public sealed partial class MainWindow : Window
             await _engine.ExtractAsync(_openArchive, temp, new[] { item.FullPath });
             SetBusy(false);
             var outPath = Path.Combine(temp, item.FullPath);
-            if (File.Exists(outPath)) LaunchPath(outPath);
+            if (File.Exists(outPath)) await PreviewPathAsync(outPath, item.Name);
         }
         catch (Exception ex) { SetBusy(false); await ShowError("Не удалось открыть файл", ex.Message); }
+    }
+
+    private async Task OpenArchiveNestedAsync(FileItem item)
+    {
+        if (_openArchive is null) return;
+        try
+        {
+            var temp = Path.Combine(Path.GetTempPath(), "711zip_view", Guid.NewGuid().ToString("N"));
+            SetBusy(true);
+            await _engine.ExtractAsync(_openArchive, temp, new[] { item.FullPath });
+            SetBusy(false);
+            var outPath = Path.Combine(temp, item.FullPath);
+            if (File.Exists(outPath)) await OpenArchiveAsync(outPath);
+        }
+        catch (Exception ex) { SetBusy(false); await ShowError("Не удалось открыть архив", ex.Message); }
+    }
+
+    // ---------- In-app preview ----------
+
+    private static readonly HashSet<string> ImageExts = new(StringComparer.OrdinalIgnoreCase)
+    { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff" };
+
+    private static readonly HashSet<string> TextExts = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".txt", ".md", ".log", ".json", ".xml", ".csv", ".ini", ".cfg", ".conf", ".yml", ".yaml",
+        ".cs", ".js", ".ts", ".jsx", ".tsx", ".html", ".htm", ".css", ".py", ".c", ".cpp", ".cc",
+        ".h", ".hpp", ".java", ".go", ".rs", ".sql", ".bat", ".cmd", ".ps1", ".sh", ".gitignore",
+        ".toml", ".env", ".properties", ".gradle", ".rb", ".php", ".lua", ".r", ".m", ".vb", ".xaml"
+    };
+
+    /// <summary>Preview a file on disk inside the app when the format is simple,
+    /// otherwise hand it off to the shell.</summary>
+    private async Task PreviewPathAsync(string path, string displayName)
+    {
+        var ext = Path.GetExtension(path);
+        try
+        {
+            if (ImageExts.Contains(ext))
+            {
+                var img = new Image { Stretch = Stretch.Uniform, MaxWidth = 720, MaxHeight = 520 };
+                var bmp = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage();
+                using (var s = File.OpenRead(path))
+                    await bmp.SetSourceAsync(s.AsRandomAccessStream());
+                img.Source = bmp;
+                await ShowContentDialog(displayName, img, wide: true);
+                return;
+            }
+            if (TextExts.Contains(ext) || new FileInfo(path).Length <= 256 * 1024)
+            {
+                const int cap = 512 * 1024;
+                string text;
+                using (var fs = File.OpenRead(path))
+                {
+                    var len = (int)Math.Min(fs.Length, cap);
+                    var buf = new byte[len];
+                    _ = await fs.ReadAsync(buf.AsMemory(0, len));
+                    text = System.Text.Encoding.UTF8.GetString(buf);
+                    if (fs.Length > cap) text += "\n\n… (файл обрезан для предпросмотра)";
+                }
+                var tb = new TextBox
+                {
+                    Text = text, IsReadOnly = true, TextWrapping = TextWrapping.NoWrap,
+                    FontFamily = new FontFamily("Consolas"), AcceptsReturn = true,
+                    Height = 480, MinWidth = 640,
+                };
+                await ShowContentDialog(displayName, new ScrollViewer
+                {
+                    Content = tb, HorizontalScrollMode = ScrollMode.Auto,
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                }, wide: true);
+                return;
+            }
+        }
+        catch (Exception ex) { await ShowError("Не удалось показать предпросмотр", ex.Message); return; }
+
+        LaunchPath(path); // unknown/binary format → open with the default app
+    }
+
+    private async Task ShowContentDialog(string title, UIElement content, bool wide = false)
+    {
+        var dlg = new ContentDialog
+        {
+            Title = title, Content = content, CloseButtonText = "Закрыть", XamlRoot = RootGrid.XamlRoot,
+        };
+        if (wide) dlg.Resources["ContentDialogMaxWidth"] = 900.0;
+        await dlg.ShowAsync();
     }
 
     // ---------- Properties ----------
@@ -1003,7 +1242,7 @@ public sealed partial class MainWindow : Window
     {
         var ver = typeof(App).Assembly.GetName().Version;
         var panel = new StackPanel { Spacing = 8, MinWidth = 320 };
-        panel.Children.Add(new TextBlock { Text = "711zip", FontSize = 22, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
+        panel.Children.Add(new TextBlock { Text = "711-zip", FontSize = 22, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
         panel.Children.Add(new TextBlock { Text = $"Версия {ver?.ToString(3)}", Opacity = 0.8 });
         panel.Children.Add(new TextBlock { Text = "Интерфейс в стиле Windows 11 для 7-Zip.", TextWrapping = TextWrapping.Wrap });
         panel.Children.Add(new TextBlock { Text = "Работает на движке 7-Zip (7z.exe).", TextWrapping = TextWrapping.Wrap, Opacity = 0.8 });

@@ -1,4 +1,4 @@
-; Inno Setup script for 711zip.
+; Inno Setup script for 711-zip.
 ; Compiled by tools/build-dist.ps1, which passes PublishDir and AppVersion.
 
 #ifndef AppVersion
@@ -8,10 +8,13 @@
   #define PublishDir "..\src\App\bin\x64\Release\net10.0-windows10.0.19041.0\win-x64\publish"
 #endif
 
-#define AppName "711zip"
+#define AppName "711-zip"
 #define AppExe "Zip711.exe"
 #define AppPublisher "metawka"
 #define AppUrl "https://github.com/metawka/711zip"
+; All program files live under {app}\app so the install root stays clean
+; (just the launcher shortcut and the uninstaller).
+#define AppSub "app"
 
 [Setup]
 AppId={{A7F1E2C4-711D-4B11-9E7A-1A2B3C4D5E6F}
@@ -21,10 +24,11 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppUrl}
 AppSupportURL={#AppUrl}
 DefaultDirName={autopf}\711zip
-DefaultGroupName=711zip
+DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-UninstallDisplayName=711zip
-UninstallDisplayIcon={app}\{#AppExe}
+UninstallDisplayName={#AppName}
+UninstallDisplayIcon={app}\{#AppSub}\{#AppExe}
+SetupIconFile=..\src\App\Assets\app.ico
 OutputDir=..\dist
 OutputBaseFilename=711zip-{#AppVersion}-setup
 Compression=lzma2/ultra64
@@ -34,6 +38,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 MinVersion=10.0.17763
+ChangesAssociations=yes
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -43,11 +48,69 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#PublishDir}\*"; DestDir: "{app}\{#AppSub}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]
-Name: "{group}\711zip"; Filename: "{app}\{#AppExe}"
-Name: "{autodesktop}\711zip"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
+; Clean launcher in the install root, plus Start-menu and (optional) desktop icons.
+Name: "{app}\711-zip";              Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
+Name: "{group}\711-zip";            Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
+Name: "{autodesktop}\711-zip";      Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"; Tasks: desktopicon
+
+[Registry]
+; ---- "Open with" registration (Screenshot_5 dialog) ----
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "711-zip"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".7z"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".zip"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".rar"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".tar"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".gz"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".bz2"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".xz"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".cab"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; ValueType: string; ValueName: ".iso"; ValueData: ""
+
+; ---- Explorer context menu for .zip (WinRAR-style quick tools) ----
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.open"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extracthere"; ValueType: string; ValueName: ""; ValueData: "Извлечь здесь (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extracthere"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extracthere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --extract-here ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extractto"; ValueType: string; ValueName: ""; ValueData: "Извлечь в папку (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extractto"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extractto\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --extract ""%1"""
+
+; ---- Explorer context menu for .7z ----
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.open"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extracthere"; ValueType: string; ValueName: ""; ValueData: "Извлечь здесь (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extracthere"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extracthere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --extract-here ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extractto"; ValueType: string; ValueName: ""; ValueData: "Извлечь в папку (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extractto"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extractto\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --extract ""%1"""
+
+; ---- Explorer context menu for .rar ----
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.open"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extracthere"; ValueType: string; ValueName: ""; ValueData: "Извлечь здесь (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extracthere"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extracthere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --extract-here ""%1"""
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extractto"; ValueType: string; ValueName: ""; ValueData: "Извлечь в папку (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extractto"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extractto\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --extract ""%1"""
+
+; ---- "Добавить в архив" on files and folders ----
+Root: HKA; Subkey: "Software\Classes\*\shell\711zip.compress"; ValueType: string; ValueName: ""; ValueData: "Добавить в архив (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\*\shell\711zip.compress"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\*\shell\711zip.compress\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --compress ""%1"""
+Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip.compress"; ValueType: string; ValueName: ""; ValueData: "Добавить в архив (711-zip)"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip.compress"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip.compress\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" --compress ""%1"""
 
 [Run]
-Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,711zip}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppSub}\{#AppExe}"; Description: "{cm:LaunchProgram,711-zip}"; Flags: nowait postinstall skipifsilent

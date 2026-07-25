@@ -26,6 +26,7 @@ public sealed class AppSettings
     public int DefaultLevel { get; set; } = 5;             // 0..9 (7z -mx)
     public bool ShowHidden { get; set; } = false;
     public bool ConfirmDelete { get; set; } = true;
+    public string LastPath { get; set; } = "";              // reopened on next launch
     public List<FavoriteEntry> Favorites { get; set; } = new();
 
     // ---------- Persistence ----------

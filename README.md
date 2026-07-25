@@ -12,16 +12,35 @@ compact and fast.
 
 ## Status
 
-Early development. Working so far:
+Active development — **v0.3.0**. Working so far:
 
 - [x] WinUI 3 shell with Mica backdrop and custom title bar
-- [x] Light / dark theme toggle
-- [x] Bundled 7-Zip engine (`7z.dll`, all formats incl. RAR read)
-- [ ] File browser (dual pane)
-- [ ] Open / extract archives
-- [ ] Create / update archives (all codecs)
-- [ ] Explorer context-menu integration
-- [ ] Installer
+- [x] Light / dark theme toggle (with readable caption buttons in both themes)
+- [x] Bundled 7-Zip engine (`7z.dll`/`7z.exe`, all formats incl. RAR read)
+- [x] Single-pane file browser: drives, folders, breadcrumb path box with live
+      folder autocomplete, typed-path navigation, instant single-click Back
+- [x] Reopens the last folder on launch (like the 7-Zip file manager)
+- [x] Open / browse archives (incl. nested archives) and extract
+- [x] Create / update archives (7z/zip, selectable level, password, destination folder)
+- [x] Full right-click context menus (background + item): open, extract, view,
+      compress, cut/copy/paste, rename, delete (to Recycle Bin), properties
+- [x] Favorites — a pinned virtual folder in "This PC"
+- [x] Drag & drop, in and out (including extracting straight out of an archive)
+- [x] File-type icons (image / video / audio / code / docs / …)
+- [x] In-app preview for simple formats (images, text/code)
+- [x] Resizable, aligned columns (Name / Size / Modified)
+- [x] Settings (theme, default format/level, hidden files, delete confirmation)
+- [x] Explorer context-menu integration & "Open with" registration
+- [x] Inno Setup installer (self-contained, clean install root)
+
+## Install
+
+Download the latest `711zip-<version>-setup.exe` from
+[Releases](https://github.com/metawka/711zip/releases) and run it. Program files
+install under `C:\Program Files\711zip\app\`, keeping the install root clean
+(just the launcher shortcut and the uninstaller). The installer registers
+711-zip in the Windows **Open with** dialog and adds Explorer right-click verbs
+(*Open in 711-zip*, *Extract here*, *Extract to folder*, *Add to archive*).
 
 ## Build
 
