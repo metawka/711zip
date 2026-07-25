@@ -12,6 +12,7 @@ using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 using Windows.Storage;
 using Windows.System;
 using Zip711.Models;
@@ -40,7 +41,16 @@ public sealed partial class MainWindow : Window
     private string? _openArchive;
     private IReadOnlyList<SevenZipRunner.ArchiveEntry> _archiveEntries = Array.Empty<SevenZipRunner.ArchiveEntry>();
     private string _archiveSubPath = "";       // "" = archive root, otherwise "dir\sub\"
-    private readonly Stack<Action> _back = new();
+
+    // Back / forward history. Each entry restores a view and its scroll offset.
+    private sealed record NavEntry(Action Restore, double Scroll);
+    private readonly Stack<NavEntry> _back = new();
+    private readonly Stack<NavEntry> _forward = new();
+    private ScrollViewer? _listScroll;
+
+    // Search + status.
+    private List<FileItem> _snapshot = new();  // unfiltered items for the current view
+    private string _search = "";
 
     // Internal clipboard for cut/copy/paste.
     private List<string> _clip = new();
@@ -62,8 +72,28 @@ public sealed partial class MainWindow : Window
         FileList.SelectionChanged += (_, _) => UpdateCommandState();
         FileList.KeyDown += OnListKeyDown;
 
+        AddAccel(VirtualKey.F, VirtualKeyModifiers.Control, (_, a) => { ToggleSearch(true); a.Handled = true; });
+        AddAccel(VirtualKey.R, VirtualKeyModifiers.Control, (_, a) => { RefreshCurrent(); a.Handled = true; });
+        AddAccel(VirtualKey.L, VirtualKeyModifiers.Control, (_, a) => { PathBox.Focus(FocusState.Programmatic); a.Handled = true; });
+        AddAccel(VirtualKey.Left, VirtualKeyModifiers.Menu, (_, a) => { OnBack(this, null!); a.Handled = true; });
+        AddAccel(VirtualKey.Right, VirtualKeyModifiers.Menu, (_, a) => { OnForward(this, null!); a.Handled = true; });
+
         ApplyTheme(ParseTheme(_settings.Theme));
         OpenFromCommandLine();
+
+        if (!_settings.GuideShown)
+            DispatcherQueue.TryEnqueue(async () =>
+            {
+                await Onboarding.ShowAsync(RootGrid.XamlRoot);
+                _settings.GuideShown = true; _settings.Save();
+            });
+    }
+
+    private void AddAccel(VirtualKey key, VirtualKeyModifiers mods, TypedEventHandler<KeyboardAccelerator, KeyboardAcceleratorInvokedEventArgs> handler)
+    {
+        var acc = new KeyboardAccelerator { Key = key, Modifiers = mods };
+        acc.Invoked += handler;
+        RootGrid.KeyboardAccelerators.Add(acc);
     }
 
     private void SetWindowIcon()
@@ -128,21 +158,10 @@ public sealed partial class MainWindow : Window
         _ => ElementTheme.Default,
     };
 
-    private void OnToggleTheme(object sender, RoutedEventArgs e)
-    {
-        var next = RootGrid.ActualTheme == ElementTheme.Dark ? ElementTheme.Light : ElementTheme.Dark;
-        ApplyTheme(next);
-        _settings.Theme = next.ToString();
-        _settings.Save();
-    }
-
     private void ApplyTheme(ElementTheme theme)
     {
         RootGrid.RequestedTheme = theme;
-        bool dark = RootGrid.ActualTheme == ElementTheme.Dark;
-        int glyph = dark ? 0xE706 : 0xE708;
-        ThemeGlyph.Glyph = char.ConvertFromUtf32(glyph);
-        ApplyCaptionColors(dark);
+        ApplyCaptionColors(RootGrid.ActualTheme == ElementTheme.Dark);
     }
 
     // Custom title bars leave the min/max/close glyphs at their default colours,
@@ -197,6 +216,7 @@ public sealed partial class MainWindow : Window
         PathBox.Text = "Этот компьютер";
         SetStatus($"Дисков: {Items.Count - 1}");
         UpdateCommandState();
+        SnapshotItems();
     }
 
     private void ShowFavorites(bool pushHistory = true)
@@ -214,6 +234,7 @@ public sealed partial class MainWindow : Window
                 Name = f.Name,
                 FullPath = f.Path,
                 Kind = f.Kind,
+                Subtitle = f.Path,
                 Modified = exists ? (f.Kind == ItemKind.Folder ? new DirectoryInfo(f.Path).LastWriteTime : new FileInfo(f.Path).LastWriteTime) : null,
                 Size = exists && f.Kind != ItemKind.Folder ? new FileInfo(f.Path).Length : 0,
             });
@@ -221,6 +242,7 @@ public sealed partial class MainWindow : Window
         PathBox.Text = "Избранное";
         SetStatus($"В избранном: {_settings.Favorites.Count}");
         UpdateCommandState();
+        SnapshotItems();
     }
 
     private void NavigateToFolder(string path, bool pushHistory = true)
@@ -258,6 +280,7 @@ public sealed partial class MainWindow : Window
             UpdateCommandState();
 
             if (_settings.LastPath != dir.FullName) { _settings.LastPath = dir.FullName; _settings.Save(); }
+            SnapshotItems();
         }
         catch (Exception ex)
         {
@@ -336,6 +359,7 @@ public sealed partial class MainWindow : Window
         PathBox.Text = prefix.Length > 0 ? $"{_openArchive}\\{prefix.TrimEnd('\\')}" : _openArchive!;
         SetStatus($"Архив: {files.Count} файлов, {folders.Count} папок");
         UpdateCommandState();
+        SnapshotItems();
     }
 
     private void OnItemActivated(object sender, DoubleTappedRoutedEventArgs e)
@@ -393,10 +417,106 @@ public sealed partial class MainWindow : Window
 
     private void OnBack(object sender, RoutedEventArgs e)
     {
-        if (_back.Count > 0) _back.Pop().Invoke();
+        if (_back.Count == 0) return;
+        _forward.Push(CaptureCurrent());
+        var entry = _back.Pop();
+        entry.Restore();
+        RestoreScroll(entry.Scroll);
+    }
+
+    private void OnForward(object sender, RoutedEventArgs e)
+    {
+        if (_forward.Count == 0) return;
+        _back.Push(CaptureCurrent());
+        var entry = _forward.Pop();
+        entry.Restore();
+        RestoreScroll(entry.Scroll);
+    }
+
+    // Mouse side buttons: X1 = back, X2 = forward.
+    private void OnRootPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var props = e.GetCurrentPoint(RootGrid).Properties;
+        if (props.IsXButton1Pressed) { OnBack(this, null!); e.Handled = true; }
+        else if (props.IsXButton2Pressed) { OnForward(this, null!); e.Handled = true; }
+    }
+
+    private ScrollViewer? ListScroll => _listScroll ??= FindScrollViewer(FileList);
+
+    private static ScrollViewer? FindScrollViewer(DependencyObject root)
+    {
+        if (root is ScrollViewer sv) return sv;
+        int n = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (int i = 0; i < n; i++)
+        {
+            var child = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(root, i);
+            var r = FindScrollViewer(child);
+            if (r is not null) return r;
+        }
+        return null;
+    }
+
+    private void RestoreScroll(double offset)
+    {
+        // Items repopulate synchronously for folders; give layout a beat, then scroll.
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low,
+            () => ListScroll?.ChangeView(null, offset, null, disableAnimation: true));
     }
 
     private void OnRefresh(object sender, RoutedEventArgs e) => RefreshCurrent();
+
+    // ---------- Search ----------
+
+    private void OnToggleSearch(object sender, RoutedEventArgs e) => ToggleSearch(SearchBar.Visibility != Visibility.Visible);
+
+    private void ToggleSearch(bool show)
+    {
+        SearchBar.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        if (show) { SearchBox.Focus(FocusState.Programmatic); SearchBox.SelectAll(); }
+        else
+        {
+            SearchBox.Text = "";
+            _search = "";
+            ApplySearch();
+            FileList.Focus(FocusState.Programmatic);
+        }
+    }
+
+    private void OnSearchChanged(object sender, TextChangedEventArgs e)
+    {
+        _search = SearchBox.Text ?? "";
+        ApplySearch();
+    }
+
+    private void OnSearchKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Escape) { ToggleSearch(false); e.Handled = true; }
+        else if (e.Key == VirtualKey.Enter)
+        {
+            var first = Items.FirstOrDefault(i => i.Kind != ItemKind.UpDir);
+            if (first is not null) { FileList.SelectedItem = first; ActivateItem(first); e.Handled = true; }
+        }
+    }
+
+    // Store the unfiltered items for the current view, then re-apply any live filter.
+    private void SnapshotItems()
+    {
+        _snapshot = Items.ToList();
+        if (!string.IsNullOrEmpty(_search)) ApplySearch();
+    }
+
+    private void ApplySearch()
+    {
+        var term = _search.Trim();
+        Items.Clear();
+        foreach (var it in _snapshot)
+        {
+            if (it.Kind is ItemKind.UpDir or ItemKind.Favorites
+                || term.Length == 0
+                || it.Name.Contains(term, StringComparison.OrdinalIgnoreCase))
+                Items.Add(it);
+        }
+    }
 
     private void RefreshCurrent()
     {
@@ -472,6 +592,7 @@ public sealed partial class MainWindow : Window
         switch (e.Key)
         {
             case VirtualKey.Enter: ActivateItem(FileList.SelectedItem as FileItem); e.Handled = true; break;
+            case VirtualKey.Space: PreviewSelected(); e.Handled = true; break;
             case VirtualKey.Back: OnUp(this, null!); e.Handled = true; break;
             case VirtualKey.Delete: _ = ActionDeleteAsync(); e.Handled = true; break;
             case VirtualKey.F2: _ = ActionRenameAsync(); e.Handled = true; break;
@@ -507,16 +628,16 @@ public sealed partial class MainWindow : Window
     {
         var selCount = FileList.SelectedItems.OfType<FileItem>().Count(i => i.Kind != ItemKind.UpDir);
 
-        menu.Items.Add(Mi("Открыть", 0xE8E5, (_, _) => ActivateItem(item)));
+        menu.Items.Add(Mi("Открыть", 0xE8E5, (_, _) => ActivateItem(item), accel: "Enter"));
 
         if (_view == View.Archive)
         {
             menu.Items.Add(Mi("Извлечь", 0xE8DE, (_, _) => OnExtract(this, null!)));
             if (item.Kind is ItemKind.File or ItemKind.Archive)
-                menu.Items.Add(Mi("Просмотр", 0xE890, (_, _) => _ = ViewArchiveEntryAsync(item)));
+                menu.Items.Add(Mi("Просмотр", 0xE890, (_, _) => _ = ViewArchiveEntryAsync(item), accel: "Пробел"));
             menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(Mi("Переименовать", 0xE8AC, (_, _) => _ = ActionRenameAsync(), enabled: selCount == 1));
-            menu.Items.Add(Mi("Удалить из архива", 0xE74D, (_, _) => _ = ActionDeleteFromArchiveAsync()));
+            menu.Items.Add(Mi("Переименовать", 0xE8AC, (_, _) => _ = ActionRenameAsync(), enabled: selCount == 1, accel: "F2"));
+            menu.Items.Add(Mi("Удалить из архива", 0xE74D, (_, _) => _ = ActionDeleteFromArchiveAsync(), accel: "Del"));
             menu.Items.Add(new MenuFlyoutSeparator());
             menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item)));
             return;
@@ -534,16 +655,16 @@ public sealed partial class MainWindow : Window
         if (item.Kind == ItemKind.Archive)
             menu.Items.Add(Mi("Извлечь", 0xE8DE, (_, _) => OnExtract(this, null!)));
         if (item.Kind is ItemKind.File or ItemKind.Archive)
-            menu.Items.Add(Mi("Просмотр", 0xE890, (_, _) => _ = PreviewPathAsync(item.FullPath, item.Name)));
+            menu.Items.Add(Mi("Просмотр", 0xE890, (_, _) => _ = PreviewPathAsync(item.FullPath, item.Name), accel: "Пробел"));
 
         if (item.Kind != ItemKind.Drive)
         {
             menu.Items.Add(Mi("Добавить в архив", 0xE710, (_, _) => OnCompress(this, null!)));
             menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(Mi("Вырезать", 0xE8C6, (_, _) => _ = ActionClipboardAsync(cut: true)));
-            menu.Items.Add(Mi("Копировать", 0xE8C8, (_, _) => _ = ActionClipboardAsync(cut: false)));
-            menu.Items.Add(Mi("Переименовать", 0xE8AC, (_, _) => _ = ActionRenameAsync(), enabled: selCount == 1));
-            menu.Items.Add(Mi("Удалить", 0xE74D, (_, _) => _ = ActionDeleteAsync()));
+            menu.Items.Add(Mi("Вырезать", 0xE8C6, (_, _) => _ = ActionClipboardAsync(cut: true), accel: "Ctrl+X"));
+            menu.Items.Add(Mi("Копировать", 0xE8C8, (_, _) => _ = ActionClipboardAsync(cut: false), accel: "Ctrl+C"));
+            menu.Items.Add(Mi("Переименовать", 0xE8AC, (_, _) => _ = ActionRenameAsync(), enabled: selCount == 1, accel: "F2"));
+            menu.Items.Add(Mi("Удалить", 0xE74D, (_, _) => _ = ActionDeleteAsync(), accel: "Del"));
             menu.Items.Add(new MenuFlyoutSeparator());
         }
         menu.Items.Add(Mi("В избранное", 0xE734, (_, _) => AddSelectedToFavorites()));
@@ -557,9 +678,9 @@ public sealed partial class MainWindow : Window
         {
             menu.Items.Add(Mi("Создать папку", 0xE8F4, (_, _) => _ = ActionNewFolderAsync()));
             menu.Items.Add(Mi("Создать файл", 0xE7C3, (_, _) => _ = ActionNewFileAsync()));
-            menu.Items.Add(Mi("Вставить", 0xE77F, (_, _) => _ = ActionPasteAsync(), enabled: _clip.Count > 0 || ClipboardHasFiles()));
+            menu.Items.Add(Mi("Вставить", 0xE77F, (_, _) => _ = ActionPasteAsync(), enabled: _clip.Count > 0 || ClipboardHasFiles(), accel: "Ctrl+V"));
             menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(Mi("Обновить", 0xE72C, (_, _) => RefreshCurrent()));
+            menu.Items.Add(Mi("Обновить", 0xE72C, (_, _) => RefreshCurrent(), accel: "F5"));
             menu.Items.Add(Mi("Папку в избранное", 0xE734, (_, _) => AddFavoritePath(_currentDir!)));
             menu.Items.Add(new MenuFlyoutSeparator());
             menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(
@@ -574,9 +695,10 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private static MenuFlyoutItem Mi(string text, int glyph, RoutedEventHandler onClick, bool enabled = true)
+    private static MenuFlyoutItem Mi(string text, int glyph, RoutedEventHandler onClick, bool enabled = true, string? accel = null)
     {
         var mi = new MenuFlyoutItem { Text = text, Icon = new FontIcon { Glyph = char.ConvertFromUtf32(glyph) }, IsEnabled = enabled };
+        if (accel is not null) mi.KeyboardAcceleratorTextOverride = accel;
         mi.Click += onClick;
         return mi;
     }
@@ -896,8 +1018,8 @@ public sealed partial class MainWindow : Window
         ItemKind kind = Directory.Exists(path) ? ItemKind.Folder : IsArchive(path) ? ItemKind.Archive : ItemKind.File;
         _settings.Favorites.Add(new FavoriteEntry { Name = Path.GetFileName(path.TrimEnd('\\')) is { Length: > 0 } n ? n : path, Path = path, Kind = kind });
         _settings.Save();
-        SetStatus("Добавлено в избранное");
         if (_view == View.Favorites) ShowFavorites(pushHistory: false);
+        SetTransientStatus("Добавлено в избранное");
     }
 
     private void RemoveFavorite(FileItem item)
@@ -909,17 +1031,30 @@ public sealed partial class MainWindow : Window
 
     // ---------- Drag & drop ----------
 
-    private void OnDragItemsStarting(object sender, DragItemsStartingEventArgs e)
+    // Enable per-item dragging on each container so we can supply a compact drag
+    // visual (the OS file glyph) rather than the full row snapshot.
+    private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
     {
-        var sel = e.Items.OfType<FileItem>()
+        if (args.ItemContainer is ListViewItem li)
+        {
+            li.CanDrag = true;
+            li.DragStarting -= OnItemDragStarting;
+            li.DragStarting += OnItemDragStarting;
+        }
+    }
+
+    private async void OnItemDragStarting(UIElement sender, DragStartingEventArgs e)
+    {
+        var origin = (sender as FrameworkElement)?.DataContext as FileItem;
+        var sel = FileList.SelectedItems.OfType<FileItem>()
             .Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites).ToList();
+        if (origin is not null && origin.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites
+            && !sel.Contains(origin))
+            sel = new List<FileItem> { origin };
         if (sel.Count == 0 || _view is View.Drives) { e.Cancel = true; return; }
 
         e.Data.RequestedOperation = DataPackageOperation.Copy;
 
-        // Real files (folder/favorites view) already exist on disk: hand them over
-        // synchronously so Explorer and the desktop recognise the drop target and
-        // show a clean file cursor instead of the ⊘ no-drop icon.
         if (_view is View.Folder or View.Favorites)
         {
             try
@@ -932,23 +1067,28 @@ public sealed partial class MainWindow : Window
                     else if (File.Exists(i.FullPath))
                         items.Add(StorageFile.GetFileFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
                 }
-                if (items.Count > 0) { e.Data.SetStorageItems(items, readOnly: false); return; }
+                if (items.Count == 0) { e.Cancel = true; return; }
+                e.Data.SetStorageItems(items, readOnly: false);
+                e.DragUI.SetContentFromDataPackage(); // compact OS file icon, not the row strip
             }
-            catch { /* fall through to the deferred provider below */ }
+            catch { e.Cancel = true; }
+            return;
         }
 
-        // Archive entries have to be extracted first, so defer their production.
-        e.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
+        // Archive view: extract to temp first (needs a deferral).
+        var def = e.GetDeferral();
+        try
         {
-            var deferral = request.GetDeferral();
-            try
+            var items = await BuildDragStorageItemsAsync(sel);
+            if (items.Count > 0)
             {
-                var items = await BuildDragStorageItemsAsync(sel);
-                if (items.Count > 0) request.SetData(items);
+                e.Data.SetStorageItems(items, readOnly: false);
+                e.DragUI.SetContentFromDataPackage();
             }
-            catch { /* nothing to hand over */ }
-            finally { deferral.Complete(); }
-        });
+            else e.Cancel = true;
+        }
+        catch { e.Cancel = true; }
+        finally { def.Complete(); }
     }
 
     private async Task<List<IStorageItem>> BuildDragStorageItemsAsync(List<FileItem> sel)
@@ -1068,8 +1208,26 @@ public sealed partial class MainWindow : Window
 
     // ---------- In-app preview ----------
 
+    private void PreviewSelected()
+    {
+        if (FileList.SelectedItem is not FileItem item) return;
+        if (item.Kind is ItemKind.UpDir or ItemKind.Drive or ItemKind.Favorites) return;
+        if (_view == View.Archive)
+        {
+            if (item.Kind is ItemKind.File or ItemKind.Archive) _ = ViewArchiveEntryAsync(item);
+        }
+        else if (item.Kind is ItemKind.File or ItemKind.Archive)
+            _ = PreviewPathAsync(item.FullPath, item.Name);
+    }
+
     private static readonly HashSet<string> ImageExts = new(StringComparer.OrdinalIgnoreCase)
     { ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".tif", ".tiff" };
+
+    private static readonly HashSet<string> VideoExts = new(StringComparer.OrdinalIgnoreCase)
+    { ".mp4", ".mkv", ".avi", ".mov", ".webm", ".m4v", ".mpg", ".mpeg", ".wmv" };
+
+    private static readonly HashSet<string> AudioExts = new(StringComparer.OrdinalIgnoreCase)
+    { ".mp3", ".wav", ".flac", ".aac", ".ogg", ".m4a", ".wma", ".opus" };
 
     private static readonly HashSet<string> TextExts = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -1086,6 +1244,24 @@ public sealed partial class MainWindow : Window
         var ext = Path.GetExtension(path);
         try
         {
+            if (VideoExts.Contains(ext) || AudioExts.Contains(ext))
+            {
+                var mpe = new MediaPlayerElement
+                {
+                    AutoPlay = true, AreTransportControlsEnabled = true,
+                    Source = Windows.Media.Core.MediaSource.CreateFromUri(new Uri(path)),
+                    Width = AudioExts.Contains(ext) ? 480 : 720,
+                    Height = AudioExts.Contains(ext) ? 80 : 440,
+                };
+                var dlg = new ContentDialog
+                {
+                    Title = displayName, Content = mpe, CloseButtonText = "Закрыть", XamlRoot = RootGrid.XamlRoot,
+                };
+                dlg.Resources["ContentDialogMaxWidth"] = 900.0;
+                dlg.Closed += (_, _) => mpe.MediaPlayer?.Pause();
+                await dlg.ShowAsync();
+                return;
+            }
             if (ImageExts.Contains(ext))
             {
                 var img = new Image { Stretch = Stretch.Uniform, MaxWidth = 720, MaxHeight = 520 };
@@ -1215,9 +1391,15 @@ public sealed partial class MainWindow : Window
         var hiddenSwitch = new ToggleSwitch { Header = "Показывать скрытые и системные файлы", IsOn = _settings.ShowHidden };
         var confirmSwitch = new ToggleSwitch { Header = "Подтверждать удаление", IsOn = _settings.ConfirmDelete };
 
+        bool openAbout = false, openGuide = false;
+        var aboutBtn = new Button { Content = "О программе 711-zip", HorizontalAlignment = HorizontalAlignment.Stretch };
+        var guideBtn = new Button { Content = "Показать краткий гайд", HorizontalAlignment = HorizontalAlignment.Stretch };
+
         var panel = new StackPanel { Spacing = 12, MinWidth = 340 };
         panel.Children.Add(themeBox); panel.Children.Add(formatBox); panel.Children.Add(levelBox);
         panel.Children.Add(hiddenSwitch); panel.Children.Add(confirmSwitch);
+        panel.Children.Add(new Border { Height = 1, Background = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"], Margin = new Thickness(0, 4, 0, 4) });
+        panel.Children.Add(guideBtn); panel.Children.Add(aboutBtn);
 
         var dlg = new ContentDialog
         {
@@ -1225,7 +1407,13 @@ public sealed partial class MainWindow : Window
             PrimaryButtonText = "Сохранить", CloseButtonText = "Отмена",
             DefaultButton = ContentDialogButton.Primary, XamlRoot = RootGrid.XamlRoot,
         };
-        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return;
+        aboutBtn.Click += (_, _) => { openAbout = true; dlg.Hide(); };
+        guideBtn.Click += (_, _) => { openGuide = true; dlg.Hide(); };
+
+        var result = await dlg.ShowAsync();
+        if (openAbout) { await ShowAboutAsync(); return; }
+        if (openGuide) { await Onboarding.ShowAsync(RootGrid.XamlRoot, skippable: false); return; }
+        if (result != ContentDialogResult.Primary) return;
 
         _settings.Theme = themeBox.SelectedIndex switch { 1 => "Light", 2 => "Dark", _ => "Default" };
         _settings.DefaultFormat = (string)formatBox.SelectedItem;
@@ -1238,7 +1426,7 @@ public sealed partial class MainWindow : Window
         RefreshCurrent();
     }
 
-    private async void OnAbout(object sender, RoutedEventArgs e)
+    private async Task ShowAboutAsync()
     {
         var ver = typeof(App).Assembly.GetName().Version;
         var panel = new StackPanel { Spacing = 8, MinWidth = 320 };
@@ -1263,10 +1451,10 @@ public sealed partial class MainWindow : Window
         catch { }
     }
 
-    private void PushCurrent()
+    private NavEntry CaptureCurrent()
     {
         var view = _view; var dir = _currentDir; var arc = _openArchive; var sub = _archiveSubPath;
-        _back.Push(() =>
+        Action restore = () =>
         {
             switch (view)
             {
@@ -1275,13 +1463,21 @@ public sealed partial class MainWindow : Window
                 case View.Favorites: ShowFavorites(pushHistory: false); break;
                 default: ShowDrives(pushHistory: false); break;
             }
-        });
+        };
+        return new NavEntry(restore, ListScroll?.VerticalOffset ?? 0);
+    }
+
+    // A brand-new navigation invalidates the forward history.
+    private void PushCurrent()
+    {
+        _back.Push(CaptureCurrent());
+        _forward.Clear();
     }
 
     private void UpdateCommandState()
     {
-        UpButton.IsEnabled = _view != View.Drives;
         BackButton.IsEnabled = _back.Count > 0;
+        ForwardButton.IsEnabled = _forward.Count > 0;
 
         bool canExtract = _view == View.Archive
             || FileList.SelectedItems.OfType<FileItem>().Any(i => i.Kind == ItemKind.Archive);
@@ -1294,6 +1490,31 @@ public sealed partial class MainWindow : Window
 
     private void SetBusy(bool busy) => Busy.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
     private void SetStatus(string text) => StatusText.Text = text;
+
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _statusTimer;
+
+    // Show a short-lived message (e.g. "Добавлено в избранное") that reverts to the
+    // normal item count instead of sticking around forever.
+    private void SetTransientStatus(string text)
+    {
+        SetStatus(text);
+        if (_statusTimer is null)
+        {
+            _statusTimer = DispatcherQueue.CreateTimer();
+            _statusTimer.IsRepeating = false;
+            _statusTimer.Interval = TimeSpan.FromSeconds(2.5);
+            _statusTimer.Tick += (t, _) => { t.Stop(); RefreshStatusText(); };
+        }
+        _statusTimer.Stop();
+        _statusTimer.Start();
+    }
+
+    private void RefreshStatusText() => SetStatus(_view switch
+    {
+        View.Drives => $"Дисков: {Items.Count(i => i.Kind == ItemKind.Drive)}",
+        View.Favorites => $"В избранном: {_settings.Favorites.Count}",
+        _ => $"Элементов: {Items.Count(i => i.Kind != ItemKind.UpDir)}",
+    });
 
     private Task ShowInfo(string title, string message) => ShowDialog(title, message);
     private Task ShowError(string title, string message) => ShowDialog(title, message);

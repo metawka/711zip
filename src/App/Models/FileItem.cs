@@ -14,6 +14,11 @@ public sealed class FileItem
     public long Size { get; set; }
     public DateTimeOffset? Modified { get; set; }
 
+    /// <summary>Optional second line under the name (used to show the full path in Favorites).</summary>
+    public string Subtitle { get; set; } = "";
+    public Microsoft.UI.Xaml.Visibility SubtitleVisibility =>
+        string.IsNullOrEmpty(Subtitle) ? Microsoft.UI.Xaml.Visibility.Collapsed : Microsoft.UI.Xaml.Visibility.Visible;
+
     public bool IsContainer =>
         Kind is ItemKind.Drive or ItemKind.Folder or ItemKind.Archive or ItemKind.UpDir or ItemKind.Favorites;
 

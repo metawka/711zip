@@ -12,25 +12,30 @@ compact and fast.
 
 ## Status
 
-Active development — **v0.3.0**. Working so far:
+Stable — **v1.0.0**. Included:
 
 - [x] WinUI 3 shell with Mica backdrop and custom title bar
 - [x] Light / dark theme toggle (with readable caption buttons in both themes)
 - [x] Bundled 7-Zip engine (`7z.dll`/`7z.exe`, all formats incl. RAR read)
-- [x] Single-pane file browser: drives, folders, breadcrumb path box with live
-      folder autocomplete, typed-path navigation, instant single-click Back
+- [x] Single-pane file browser: drives, folders, path box with live folder
+      autocomplete, typed-path navigation
+- [x] Back / Forward navigation (toolbar buttons, mouse side buttons, Alt+←/→),
+      restores scroll position on Back
 - [x] Reopens the last folder on launch (like the 7-Zip file manager)
+- [x] First-run guide with the main features and keyboard shortcuts
 - [x] Open / browse archives (incl. nested archives) and extract
 - [x] Create / update archives (7z/zip, selectable level, password, destination folder)
-- [x] Full right-click context menus (background + item): open, extract, view,
-      compress, cut/copy/paste, rename, delete (to Recycle Bin), properties
-- [x] Favorites — a pinned virtual folder in "This PC"
+- [x] Full right-click context menus with shortcut hints (background + item):
+      open, extract, view, compress, cut/copy/paste, rename, delete, properties
+- [x] Favorites — a pinned virtual folder in "This PC", shows the full path
+- [x] Search within the current folder (Ctrl+F)
+- [x] Keyboard shortcuts (Ctrl+F, Ctrl+R/F5, Ctrl+L, F2, Del, Ctrl+C/X/V, Space, Alt+←/→)
 - [x] Drag & drop, in and out (including extracting straight out of an archive)
 - [x] File-type icons (image / video / audio / code / docs / …)
-- [x] In-app preview for simple formats (images, text/code)
+- [x] In-app preview for images, video, audio and text/code (Space / Esc)
 - [x] Resizable, aligned columns (Name / Size / Modified)
-- [x] Settings (theme, default format/level, hidden files, delete confirmation)
-- [x] Explorer context-menu integration & "Open with" registration
+- [x] Settings (theme, default format/level, hidden files, delete confirmation, about, guide)
+- [x] Explorer integration: one grouped "711-zip" right-click submenu & "Open with" registration
 - [x] Inno Setup installer (self-contained, clean install root)
 
 ## Install
@@ -39,8 +44,9 @@ Download the latest `711zip-<version>-setup.exe` from
 [Releases](https://github.com/metawka/711zip/releases) and run it. Program files
 install under `C:\Program Files\711zip\app\`, keeping the install root clean
 (just the launcher shortcut and the uninstaller). The installer registers
-711-zip in the Windows **Open with** dialog and adds Explorer right-click verbs
-(*Open in 711-zip*, *Extract here*, *Extract to folder*, *Add to archive*).
+711-zip in the Windows **Open with** dialog and adds a single grouped Explorer
+right-click submenu (*Open in 711-zip*, *Extract here*, *Extract to folder*,
+*Add to archive*).
 
 ## Build
 

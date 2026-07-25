@@ -27,6 +27,7 @@ public sealed class AppSettings
     public bool ShowHidden { get; set; } = false;
     public bool ConfirmDelete { get; set; } = true;
     public string LastPath { get; set; } = "";              // reopened on next launch
+    public bool GuideShown { get; set; } = false;           // first-run onboarding
     public List<FavoriteEntry> Favorites { get; set; } = new();
 
     // ---------- Persistence ----------
