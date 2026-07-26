@@ -1958,6 +1958,14 @@ public sealed partial class MainWindow : Window
     private List<FileItem> _marqueeBase = new();      // selection to keep (Ctrl/Shift additive)
     private List<FileItem> _dragSnapshot = new();     // selection at press, for multi-item drag
 
+    // A press that landed on the name text: once the pointer moves a few pixels we
+    // start the drag ourselves via StartDragAsync. Doing it programmatically avoids
+    // the framework's press-and-hold delay you get when a child CanDrag element sits
+    // inside a ListViewItem that has already captured the pointer.
+    private bool _dragHandlePending;
+    private FrameworkElement? _dragHandle;
+    private Point _dragHandleStart;
+
     // A press on the name text (the drag handle) is left to the ListView + drag system.
     // A press anywhere else on a row, or on empty space, may start a marquee — but only
     // after real movement, so a plain click still selects through the ListView.
@@ -1965,11 +1973,23 @@ public sealed partial class MainWindow : Window
     {
         _marqueePending = false;
         _marqueeActive = false;
+        _dragHandlePending = false;
+        _dragHandle = null;
         if (!e.GetCurrentPoint(FileList).Properties.IsLeftButtonPressed) return;
 
         _dragSnapshot = FileList.SelectedItems.OfType<FileItem>().ToList();
-        if (e.OriginalSource is DependencyObject d && IsWithinDragHandle(d)) return;
 
+        // Pressed on the name text: arm a programmatic drag, don't marquee.
+        if (e.OriginalSource is DependencyObject d && FindDragHandle(d) is FrameworkElement handle)
+        {
+            _dragHandlePending = true;
+            _dragHandle = handle;
+            _dragHandleStart = e.GetCurrentPoint(FileList).Position;
+            return;
+        }
+
+        // Pressed anywhere else on a row (or empty space): this is marquee territory,
+        // not a per-row click. Only the name selects; see OnListPointerReleased.
         _marqueePending = true;
         _marqueeAdditive = (e.KeyModifiers & (VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift)) != 0;
         _marqueeStart = e.GetCurrentPoint(MarqueeLayer).Position;
@@ -1978,6 +1998,18 @@ public sealed partial class MainWindow : Window
 
     private void OnListPointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        // Name-handle drag: fire the drag the instant the pointer leaves the press
+        // point, so there is no hold delay.
+        if (_dragHandlePending && _dragHandle is FrameworkElement handle)
+        {
+            var hp = e.GetCurrentPoint(FileList).Position;
+            if (Math.Abs(hp.X - _dragHandleStart.X) < 4 && Math.Abs(hp.Y - _dragHandleStart.Y) < 4) return;
+            _dragHandlePending = false;
+            _dragHandle = null;
+            try { _ = handle.StartDragAsync(e.GetCurrentPoint(handle)); } catch { /* pointer already gone */ }
+            return;
+        }
+
         if (!_marqueePending && !_marqueeActive) return;
         var p = e.GetCurrentPoint(MarqueeLayer).Position;
 
@@ -2012,24 +2044,37 @@ public sealed partial class MainWindow : Window
 
     private void OnListPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        _dragHandlePending = false;
+        _dragHandle = null;
+
+        bool plainNonNameClick = _marqueePending && !_marqueeActive;
         _marqueePending = false;
-        if (!_marqueeActive) return;
-        _marqueeActive = false;
-        MarqueeRect.Visibility = Visibility.Collapsed;
-        FileList.ReleasePointerCapture(e.Pointer);
+
+        if (_marqueeActive)
+        {
+            _marqueeActive = false;
+            MarqueeRect.Visibility = Visibility.Collapsed;
+            FileList.ReleasePointerCapture(e.Pointer);
+            return;
+        }
+
+        // A plain click off the name is like clicking empty space: the ListView will
+        // have selected the row under the cursor, so undo that — only the name selects.
+        if (plainNonNameClick && !_marqueeAdditive) FileList.SelectedItems.Clear();
     }
 
     private static bool Intersects(Rect a, Rect b) =>
         a.Left <= b.Right && a.Right >= b.Left && a.Top <= b.Bottom && a.Bottom >= b.Top;
 
-    private static bool IsWithinDragHandle(DependencyObject? node)
+    // Walk up from the pressed element to the name-text element tagged as the drag handle.
+    private static FrameworkElement? FindDragHandle(DependencyObject? node)
     {
         while (node is not null)
         {
-            if (node is FrameworkElement fe && fe.Tag as string == "draghandle") return true;
+            if (node is FrameworkElement fe && fe.Tag as string == "draghandle") return fe;
             node = VisualTreeHelper.GetParent(node);
         }
-        return false;
+        return null;
     }
 
     private static T? FindAncestor<T>(DependencyObject? node) where T : class

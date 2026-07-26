@@ -53,7 +53,7 @@ Source: "{#PublishDir}\*"; DestDir: "{app}\{#AppSub}"; Flags: recursesubdirs cre
 [Icons]
 ; Clean launcher in the install root, plus Start-menu and (optional) desktop icons.
 Name: "{app}\711-zip";              Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
-Name: "{group}\711-zip";            Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
+Name: "{group}\711-zip File Manager"; Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
 Name: "{autodesktop}\711-zip";      Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"; Tasks: desktopicon
 
 [Registry]
