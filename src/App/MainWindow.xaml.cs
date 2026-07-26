@@ -49,6 +49,7 @@ public sealed partial class MainWindow : Window
     private ScrollViewer? _listScroll;
 
     // Search + status.
+    private readonly List<FileItem> _rawItems = new();  // current view's real items (no ".."/headers), pre-order
     private List<FileItem> _snapshot = new();  // unfiltered items for the current view
     private string _search = "";
 
@@ -79,7 +80,7 @@ public sealed partial class MainWindow : Window
         if (AppWindow.Presenter is OverlappedPresenter presenter)
             presenter.IsAlwaysOnTop = false;
 
-        FileList.SelectionChanged += (_, _) => UpdateCommandState();
+        FileList.SelectionChanged += OnSelectionChanged;
         // handledEventsToo: the ListView marks Space/arrows handled for selection, so a
         // plain KeyDown subscription never sees Space — this still fires for preview.
         FileList.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnListKeyDown), handledEventsToo: true);
@@ -92,15 +93,8 @@ public sealed partial class MainWindow : Window
         AddAccel(VirtualKey.Enter, VirtualKeyModifiers.Menu, (_, a) => { ShowPropertiesForSelection(); a.Handled = true; });
 
         ApplyTheme(ParseTheme(_settings.Theme));
+        SetupItemViews();
         OpenFromCommandLine();
-
-        if (!_settings.GuideShown)
-            RootGrid.Loaded += async (_, _) =>
-            {
-                if (_settings.GuideShown || RootGrid.XamlRoot is null) return;
-                _settings.GuideShown = true; _settings.Save();
-                await Onboarding.ShowAsync(RootGrid.XamlRoot);
-            };
     }
 
     private void AddAccel(VirtualKey key, VirtualKeyModifiers mods, TypedEventHandler<KeyboardAccelerator, KeyboardAcceleratorInvokedEventArgs> handler)
@@ -276,19 +270,17 @@ public sealed partial class MainWindow : Window
             _view = View.Folder;
             _currentDir = dir.FullName;
             _openArchive = null;
-            Items.Clear();
 
-            Items.Add(new FileItem { Name = "..", FullPath = "..", Kind = ItemKind.UpDir });
-
-            foreach (var sub in dir.EnumerateDirectories().OrderBy(d => d.Name, StringComparer.OrdinalIgnoreCase))
+            _rawItems.Clear();
+            foreach (var sub in dir.EnumerateDirectories())
             {
                 if (!_settings.ShowHidden && (sub.Attributes & (System.IO.FileAttributes.Hidden | System.IO.FileAttributes.System)) != 0) continue;
-                Items.Add(new FileItem { Name = sub.Name, FullPath = sub.FullName, Kind = ItemKind.Folder, Modified = sub.LastWriteTime });
+                _rawItems.Add(new FileItem { Name = sub.Name, FullPath = sub.FullName, Kind = ItemKind.Folder, Modified = sub.LastWriteTime });
             }
-            foreach (var f in dir.EnumerateFiles().OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase))
+            foreach (var f in dir.EnumerateFiles())
             {
                 if (!_settings.ShowHidden && (f.Attributes & (System.IO.FileAttributes.Hidden | System.IO.FileAttributes.System)) != 0) continue;
-                Items.Add(new FileItem
+                _rawItems.Add(new FileItem
                 {
                     Name = f.Name, FullPath = f.FullName,
                     Kind = IsArchive(f.Name) ? ItemKind.Archive : ItemKind.File,
@@ -296,11 +288,10 @@ public sealed partial class MainWindow : Window
                 });
             }
             SetPath(dir.FullName);
-            SetStatus($"Элементов: {Items.Count - 1}");
-            UpdateCommandState();
+            ApplyOrdering();
+            SetStatus($"Элементов: {_rawItems.Count}");
 
             if (_settings.LastPath != dir.FullName) { _settings.LastPath = dir.FullName; _settings.Save(); }
-            SnapshotItems();
             StartFolderSizing();
         }
         catch (Exception ex)
@@ -320,7 +311,7 @@ public sealed partial class MainWindow : Window
     // as it lands, so the list stays responsive on directories with huge subtrees.
     private void StartFolderSizing()
     {
-        var folders = Items.Where(i => i.Kind == ItemKind.Folder).ToList();
+        var folders = _rawItems.Where(i => i.Kind == ItemKind.Folder).ToList();
         if (folders.Count == 0) return;
 
         _sizeCts = new System.Threading.CancellationTokenSource();
@@ -412,8 +403,6 @@ public sealed partial class MainWindow : Window
     private void RenderArchiveLevel()
     {
         ClearSearch();
-        Items.Clear();
-        Items.Add(new FileItem { Name = "..", FullPath = "..", Kind = ItemKind.UpDir });
         var prefix = _archiveSubPath;
         var folders = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
         var files = new List<FileItem>();
@@ -436,15 +425,15 @@ public sealed partial class MainWindow : Window
                 });
             }
         }
-        foreach (var f in folders.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
-            Items.Add(new FileItem { Name = f, FullPath = prefix + f, Kind = ItemKind.Folder });
-        foreach (var f in files.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
-            Items.Add(f);
+
+        _rawItems.Clear();
+        foreach (var f in folders)
+            _rawItems.Add(new FileItem { Name = f, FullPath = prefix + f, Kind = ItemKind.Folder });
+        _rawItems.AddRange(files);
 
         SetPath(prefix.Length > 0 ? $"{_openArchive}\\{prefix.TrimEnd('\\')}" : _openArchive!);
+        ApplyOrdering();
         SetStatus($"Архив: {files.Count} файлов, {folders.Count} папок");
-        UpdateCommandState();
-        SnapshotItems();
     }
 
     private void OnItemActivated(object sender, DoubleTappedRoutedEventArgs e)
@@ -627,8 +616,106 @@ public sealed partial class MainWindow : Window
             if (it.Kind is ItemKind.UpDir or ItemKind.Favorites
                 || term.Length == 0
                 || it.Name.Contains(term, StringComparison.OrdinalIgnoreCase))
+            {
+                // While filtering, drop group headers (their groups may be empty now).
+                if (term.Length > 0 && it.Kind == ItemKind.Header) continue;
                 Items.Add(it);
+            }
         }
+    }
+
+    // ---------- Sorting / grouping ----------
+
+    // Builds the visible Items list from _rawItems applying the current sort and
+    // grouping settings. The ".." row (folder/archive views) always leads.
+    private void ApplyOrdering()
+    {
+        Items.Clear();
+        if (_view is View.Folder or View.Archive)
+            Items.Add(new FileItem { Name = "..", FullPath = "..", Kind = ItemKind.UpDir });
+
+        if (_settings.GroupBy == "None")
+        {
+            foreach (var it in SortFlat(_rawItems, foldersFirst: true)) Items.Add(it);
+        }
+        else
+        {
+            var groups = _rawItems
+                .GroupBy(GroupOf)
+                .OrderBy(g => g.Key.order)
+                .ThenBy(g => g.Key.label, StringComparer.OrdinalIgnoreCase);
+            foreach (var g in groups)
+            {
+                Items.Add(new FileItem { Kind = ItemKind.Header, Name = g.Key.label });
+                foreach (var it in SortFlat(g, foldersFirst: false)) Items.Add(it);
+            }
+        }
+        SnapshotItems();
+        UpdateCommandState();
+    }
+
+    private List<FileItem> SortFlat(IEnumerable<FileItem> src, bool foldersFirst)
+    {
+        bool desc = _settings.SortDescending;
+        IOrderedEnumerable<FileItem> o = src.OrderBy(i => foldersFirst && i.Kind == ItemKind.Folder ? 0 : 1);
+        o = _settings.SortField switch
+        {
+            "Modified" => desc ? o.ThenByDescending(i => i.Modified ?? DateTimeOffset.MinValue)
+                               : o.ThenBy(i => i.Modified ?? DateTimeOffset.MinValue),
+            "Type" => desc ? o.ThenByDescending(i => i.Ext, StringComparer.OrdinalIgnoreCase)
+                           : o.ThenBy(i => i.Ext, StringComparer.OrdinalIgnoreCase),
+            "Size" => desc ? o.ThenByDescending(i => i.Kind == ItemKind.Folder ? (i.FolderSize ?? 0) : i.Size)
+                           : o.ThenBy(i => i.Kind == ItemKind.Folder ? (i.FolderSize ?? 0) : i.Size),
+            _ => desc ? o.ThenByDescending(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                      : o.ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase),
+        };
+        return o.ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    // (order, label) for the current GroupBy — order sorts the groups, label names them.
+    private (int order, string label) GroupOf(FileItem it)
+    {
+        switch (_settings.GroupBy)
+        {
+            case "Type":
+                return it.Kind == ItemKind.Folder ? (0, "Папки") : (1, it.TypeText.Length > 0 ? it.TypeText : "Файлы");
+            case "Modified":
+                return ModifiedBucket(it.Modified);
+            case "Size":
+                return SizeBucket(it);
+            case "Name":
+                {
+                    var c = string.IsNullOrEmpty(it.Name) ? '#' : char.ToUpperInvariant(it.Name[0]);
+                    return char.IsLetter(c) ? (1, c.ToString()) : (0, "#");
+                }
+            default:
+                return (0, "");
+        }
+    }
+
+    private static (int order, string label) ModifiedBucket(DateTimeOffset? mod)
+    {
+        if (mod is null) return (9, "Неизвестно");
+        var d = mod.Value.LocalDateTime.Date;
+        var today = DateTime.Today;
+        if (d == today) return (0, "Сегодня");
+        if (d == today.AddDays(-1)) return (1, "Вчера");
+        if (d >= today.AddDays(-7)) return (2, "На этой неделе");
+        if (d >= today.AddDays(-30)) return (3, "В этом месяце");
+        if (d.Year == today.Year) return (4, "В этом году");
+        return (5, "Давно");
+    }
+
+    private static (int order, string label) SizeBucket(FileItem it)
+    {
+        if (it.Kind == ItemKind.Folder) return (0, "Папки");
+        long s = it.Size;
+        if (s == 0) return (1, "Пусто");
+        if (s < 16L * 1024) return (2, "Крошечные (<16 КБ)");
+        if (s < 1L * 1024 * 1024) return (3, "Маленькие (<1 МБ)");
+        if (s < 128L * 1024 * 1024) return (4, "Средние (<128 МБ)");
+        if (s < 1L * 1024 * 1024 * 1024) return (5, "Большие (<1 ГБ)");
+        return (6, "Огромные (>1 ГБ)");
     }
 
     private void RefreshCurrent()
@@ -1274,20 +1361,37 @@ public sealed partial class MainWindow : Window
     {
         if (sender is not FrameworkElement fe || fe.DataContext is not FileItem clicked) { args.Cancel = true; return; }
 
-        // Drag the whole selection when the grabbed row is part of it; else just it.
-        var selected = FileList.SelectedItems.OfType<FileItem>().ToList();
-        var sel = (selected.Contains(clicked) ? selected : new List<FileItem> { clicked })
-            .Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites).ToList();
+        // Drag the whole selection when the grabbed row is part of it — check both the
+        // live selection and the snapshot taken on pointer-press, since the ListView can
+        // collapse a multi-selection to the pressed row before the drag begins.
+        var current = FileList.SelectedItems.OfType<FileItem>().ToList();
+        var baseSel = current.Contains(clicked) ? current
+                    : _dragSnapshot.Contains(clicked) ? _dragSnapshot
+                    : new List<FileItem> { clicked };
+        var sel = baseSel
+            .Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites and not ItemKind.Header)
+            .ToList();
         if (sel.Count == 0 || _view is View.Drives) { args.Cancel = true; return; }
 
         args.Data.RequestedOperation = DataPackageOperation.Copy;
 
         if (_view == View.Archive && _openArchive is not null)
         {
+            // Advertise the StorageItems format synchronously (so Explorer accepts the
+            // drop) while extracting the entries lazily when the target asks for them.
             var archive = _openArchive;
             var pw = _archivePassword;
-            var def = args.GetDeferral();
-            _ = ExtractForDragAsync(archive, pw, sel, args.Data, def);
+            args.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
+            {
+                var def = request.GetDeferral();
+                try
+                {
+                    var built = await BuildArchiveDragItemsAsync(archive, pw, sel);
+                    request.SetData(built);
+                }
+                catch { /* target gets nothing */ }
+                finally { def.Complete(); }
+            });
         }
         else
         {
@@ -1308,17 +1412,6 @@ public sealed partial class MainWindow : Window
             if (list.Count > 0) args.Data.SetStorageItems(list, readOnly: false);
             else args.Cancel = true;
         }
-    }
-
-    private async Task ExtractForDragAsync(string archive, string? pw, List<FileItem> sel, DataPackage data, DragOperationDeferral def)
-    {
-        try
-        {
-            var items = await BuildArchiveDragItemsAsync(archive, pw, sel);
-            if (items.Count > 0) data.SetStorageItems(items, readOnly: false);
-        }
-        catch { /* drop target simply gets nothing */ }
-        finally { def.Complete(); }
     }
 
     private async Task<List<IStorageItem>> BuildArchiveDragItemsAsync(string archive, string? pw, List<FileItem> sel)
@@ -1627,15 +1720,14 @@ public sealed partial class MainWindow : Window
         var hiddenSwitch = new ToggleSwitch { Header = "Показывать скрытые и системные файлы", IsOn = _settings.ShowHidden };
         var confirmSwitch = new ToggleSwitch { Header = "Подтверждать удаление", IsOn = _settings.ConfirmDelete };
 
-        bool openAbout = false, openGuide = false;
+        bool openAbout = false;
         var aboutBtn = new Button { Content = "О программе 711-zip", HorizontalAlignment = HorizontalAlignment.Stretch };
-        var guideBtn = new Button { Content = "Показать краткий гайд", HorizontalAlignment = HorizontalAlignment.Stretch };
 
         var panel = new StackPanel { Spacing = 12, MinWidth = 340 };
         panel.Children.Add(themeBox); panel.Children.Add(formatBox); panel.Children.Add(levelBox);
         panel.Children.Add(hiddenSwitch); panel.Children.Add(confirmSwitch);
         panel.Children.Add(new Border { Height = 1, Background = (Brush)Application.Current.Resources["CardStrokeColorDefaultBrush"], Margin = new Thickness(0, 4, 0, 4) });
-        panel.Children.Add(guideBtn); panel.Children.Add(aboutBtn);
+        panel.Children.Add(aboutBtn);
 
         var dlg = new ContentDialog
         {
@@ -1644,11 +1736,9 @@ public sealed partial class MainWindow : Window
             DefaultButton = ContentDialogButton.Primary, XamlRoot = RootGrid.XamlRoot,
         };
         aboutBtn.Click += (_, _) => { openAbout = true; dlg.Hide(); };
-        guideBtn.Click += (_, _) => { openGuide = true; dlg.Hide(); };
 
         var result = await dlg.ShowAsync();
         if (openAbout) { await ShowAboutAsync(); return; }
-        if (openGuide) { await Onboarding.ShowAsync(RootGrid.XamlRoot, skippable: false); return; }
         if (result != ContentDialogResult.Primary) return;
 
         _settings.Theme = themeBox.SelectedIndex switch { 1 => "Light", 2 => "Dark", _ => "Default" };
@@ -1727,60 +1817,194 @@ public sealed partial class MainWindow : Window
     private void SetBusy(bool busy) => Busy.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
     private void SetStatus(string text) => StatusText.Text = text;
 
+    // ---------- View modes, sorting, selection ----------
+
+    private ViewState _viewState = null!;
+    private FileItemTemplateSelector _templateSelector = null!;
+
+    // Reads the saved view/sort prefs, ticks the matching menu items, and applies the
+    // view mode. Called once from the constructor after the theme is set.
+    private void SetupItemViews()
+    {
+        _viewState = (ViewState)Application.Current.Resources["ViewState"];
+        _viewState.IconSize = _settings.IconSize;
+        _templateSelector = (FileItemTemplateSelector)RootGrid.Resources["ItemTemplates"];
+
+        SortNameItem.IsChecked = _settings.SortField == "Name";
+        SortModifiedItem.IsChecked = _settings.SortField == "Modified";
+        SortTypeItem.IsChecked = _settings.SortField == "Type";
+        SortSizeItem.IsChecked = _settings.SortField == "Size";
+        SortAscItem.IsChecked = !_settings.SortDescending;
+        SortDescItem.IsChecked = _settings.SortDescending;
+        GroupNoneItem.IsChecked = _settings.GroupBy == "None";
+        GroupTypeItem.IsChecked = _settings.GroupBy == "Type";
+        GroupModifiedItem.IsChecked = _settings.GroupBy == "Modified";
+        GroupSizeItem.IsChecked = _settings.GroupBy == "Size";
+        GroupNameItem.IsChecked = _settings.GroupBy == "Name";
+
+        ApplyViewMode(_settings.ViewMode, rebuild: false);
+    }
+
+    private void ApplyViewMode(string mode, bool rebuild)
+    {
+        _settings.ViewMode = mode;
+        _templateSelector.Mode = mode;
+
+        ViewLargeItem.IsChecked = mode == "LargeIcons";
+        ViewSmallItem.IsChecked = mode == "SmallIcons";
+        ViewListItem.IsChecked = mode == "List";
+        ViewDetailsItem.IsChecked = mode == "Details";
+
+        (string panel, string style) = mode switch
+        {
+            "LargeIcons" => ("WrapLargeTemplate", "TileItemStyle"),
+            "SmallIcons" => ("WrapSmallTemplate", "TileItemStyle"),
+            _ => ("StackPanelTemplate", "StackItemStyle"),
+        };
+        // Clear realized containers before swapping the panel: WinUI refuses to change
+        // ItemsPanel while items are still realized against the old one.
+        if (rebuild) Items.Clear();
+        FileList.ItemsPanel = (ItemsPanelTemplate)RootGrid.Resources[panel];
+        FileList.ItemContainerStyle = (Style)RootGrid.Resources[style];
+
+        if (rebuild) ReapplyOrdering();
+    }
+
+    // Rebuild the list so a template/panel switch re-realizes containers.
+    private void ReapplyOrdering()
+    {
+        if (_view is View.Folder or View.Archive) ApplyOrdering();
+        else RefreshCurrent();
+    }
+
+    private void OnViewModeClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is string m)
+        {
+            ApplyViewMode(m, rebuild: true);
+            _settings.Save();
+        }
+    }
+
+    private void OnSortFieldClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is string f)
+        {
+            _settings.SortField = f; _settings.Save();
+            ReapplyOrdering();
+        }
+    }
+
+    private void OnSortDirClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is string d)
+        {
+            _settings.SortDescending = d == "Desc"; _settings.Save();
+            ReapplyOrdering();
+        }
+    }
+
+    private void OnGroupClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.Tag is string g)
+        {
+            _settings.GroupBy = g; _settings.Save();
+            ReapplyOrdering();
+        }
+    }
+
+    // Ctrl+wheel resizes the icons (Explorer-style). If a non-grid mode is active it
+    // first switches to large icons, so the gesture always "does something".
+    private void OnListPointerWheel(object sender, PointerRoutedEventArgs e)
+    {
+        if ((e.KeyModifiers & VirtualKeyModifiers.Control) == 0) return;
+        int delta = e.GetCurrentPoint(FileList).Properties.MouseWheelDelta;
+        e.Handled = true;
+
+        if (_settings.ViewMode != "LargeIcons")
+        {
+            if (delta > 0) { ApplyViewMode("LargeIcons", rebuild: true); _settings.Save(); }
+            return;
+        }
+        _viewState.IconSize += delta > 0 ? 8 : -8;
+        _settings.IconSize = _viewState.IconSize; _settings.Save();
+    }
+
+    // Keep group headers and the ".." row out of the selection no matter how they
+    // were picked up (Ctrl+A, marquee, etc.).
+    private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        foreach (var it in e.AddedItems.OfType<FileItem>()
+                     .Where(i => i.Kind is ItemKind.Header or ItemKind.UpDir).ToList())
+            FileList.SelectedItems.Remove(it);
+        UpdateCommandState();
+    }
+
+    // Single click on ".." navigates up (Explorer behaviour), no double-click needed.
+    private void OnListTapped(object sender, TappedRoutedEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject d
+            && FindAncestor<ListViewItem>(d) is { } lvi
+            && FileList.ItemFromContainer(lvi) is FileItem { Kind: ItemKind.UpDir })
+            OnUp(this, null!);
+    }
+
     // ---------- Rubber-band (marquee) selection ----------
 
+    private bool _marqueePending;   // non-handle press seen; becomes a marquee once the pointer moves
     private bool _marqueeActive;
-    private Point _marqueeStart;
-    private List<FileItem> _marqueeBase = new(); // selection present when the drag began (for Ctrl-add)
     private bool _marqueeAdditive;
+    private Point _marqueeStart;
+    private List<FileItem> _marqueeBase = new();      // selection to keep (Ctrl/Shift additive)
+    private List<FileItem> _dragSnapshot = new();     // selection at press, for multi-item drag
 
-    // Start a marquee only from empty space: a press that lands on a row must keep the
-    // ListView's own click/Shift/Ctrl selection and drag behaviour untouched.
+    // A press on the name text (the drag handle) is left to the ListView + drag system.
+    // A press anywhere else on a row, or on empty space, may start a marquee — but only
+    // after real movement, so a plain click still selects through the ListView.
     private void OnListPointerPressed(object sender, PointerRoutedEventArgs e)
     {
-        var pt = e.GetCurrentPoint(FileList);
-        if (!pt.Properties.IsLeftButtonPressed) return;
-        if (e.OriginalSource is DependencyObject src && FindAncestor<ListViewItem>(src) is not null) return; // on a row
+        _marqueePending = false;
+        _marqueeActive = false;
+        if (!e.GetCurrentPoint(FileList).Properties.IsLeftButtonPressed) return;
 
-        _marqueeAdditive = (e.KeyModifiers & VirtualKeyModifiers.Control) != 0;
-        _marqueeBase = _marqueeAdditive ? FileList.SelectedItems.OfType<FileItem>().ToList() : new List<FileItem>();
-        if (!_marqueeAdditive) FileList.SelectedItems.Clear();
+        _dragSnapshot = FileList.SelectedItems.OfType<FileItem>().ToList();
+        if (e.OriginalSource is DependencyObject d && IsWithinDragHandle(d)) return;
 
-        _marqueeActive = true;
+        _marqueePending = true;
+        _marqueeAdditive = (e.KeyModifiers & (VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift)) != 0;
         _marqueeStart = e.GetCurrentPoint(MarqueeLayer).Position;
-        Canvas.SetLeft(MarqueeRect, _marqueeStart.X);
-        Canvas.SetTop(MarqueeRect, _marqueeStart.Y);
-        MarqueeRect.Width = 0;
-        MarqueeRect.Height = 0;
-        MarqueeRect.Visibility = Visibility.Visible;
-        FileList.CapturePointer(e.Pointer);
+        _marqueeBase = _marqueeAdditive ? _dragSnapshot : new List<FileItem>();
     }
 
     private void OnListPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        if (!_marqueeActive) return;
+        if (!_marqueePending && !_marqueeActive) return;
         var p = e.GetCurrentPoint(MarqueeLayer).Position;
-        double x = Math.Min(p.X, _marqueeStart.X);
-        double y = Math.Min(p.Y, _marqueeStart.Y);
-        double w = Math.Abs(p.X - _marqueeStart.X);
-        double h = Math.Abs(p.Y - _marqueeStart.Y);
-        Canvas.SetLeft(MarqueeRect, x);
-        Canvas.SetTop(MarqueeRect, y);
-        MarqueeRect.Width = w;
-        MarqueeRect.Height = h;
+
+        if (!_marqueeActive)
+        {
+            if (Math.Abs(p.X - _marqueeStart.X) < 6 && Math.Abs(p.Y - _marqueeStart.Y) < 6) return;
+            _marqueeActive = true;
+            if (!_marqueeAdditive) FileList.SelectedItems.Clear();
+            MarqueeRect.Visibility = Visibility.Visible;
+            FileList.CapturePointer(e.Pointer);
+        }
+
+        double x = Math.Min(p.X, _marqueeStart.X), y = Math.Min(p.Y, _marqueeStart.Y);
+        double w = Math.Abs(p.X - _marqueeStart.X), h = Math.Abs(p.Y - _marqueeStart.Y);
+        Canvas.SetLeft(MarqueeRect, x); Canvas.SetTop(MarqueeRect, y);
+        MarqueeRect.Width = w; MarqueeRect.Height = h;
 
         var box = new Rect(x, y, w, h);
         var hits = new HashSet<FileItem>(_marqueeBase);
         foreach (var item in Items)
         {
-            if (item.Kind == ItemKind.UpDir) continue;
+            if (item.Kind is ItemKind.UpDir or ItemKind.Header) continue;
             if (FileList.ContainerFromItem(item) is not ListViewItem lvi) continue;
             var b = lvi.TransformToVisual(MarqueeLayer).TransformBounds(new Rect(0, 0, lvi.ActualWidth, lvi.ActualHeight));
-            if (IntersectsVertically(box, b)) hits.Add(item);
+            if (Intersects(box, b)) hits.Add(item);
         }
 
-        // Reconcile the ListView selection with the hit set (avoid clearing/re-adding
-        // everything each move, which would flicker and reset the anchor).
         var current = FileList.SelectedItems.OfType<FileItem>().ToHashSet();
         foreach (var it in current.Where(c => !hits.Contains(c)).ToList()) FileList.SelectedItems.Remove(it);
         foreach (var it in hits.Where(hh => !current.Contains(hh))) FileList.SelectedItems.Add(it);
@@ -1788,18 +2012,27 @@ public sealed partial class MainWindow : Window
 
     private void OnListPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        _marqueePending = false;
         if (!_marqueeActive) return;
         _marqueeActive = false;
         MarqueeRect.Visibility = Visibility.Collapsed;
         FileList.ReleasePointerCapture(e.Pointer);
     }
 
-    // A row counts as selected when the marquee overlaps its vertical band — the list is
-    // a single column, so horizontal overlap is implied and vertical overlap is enough.
-    private static bool IntersectsVertically(Rect marquee, Rect row) =>
-        marquee.Top <= row.Bottom && marquee.Bottom >= row.Top && marquee.Height > 0;
+    private static bool Intersects(Rect a, Rect b) =>
+        a.Left <= b.Right && a.Right >= b.Left && a.Top <= b.Bottom && a.Bottom >= b.Top;
 
-    private static T? FindAncestor<T>(DependencyObject node) where T : class
+    private static bool IsWithinDragHandle(DependencyObject? node)
+    {
+        while (node is not null)
+        {
+            if (node is FrameworkElement fe && fe.Tag as string == "draghandle") return true;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return false;
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? node) where T : class
     {
         while (node is not null)
         {
@@ -1915,7 +2148,7 @@ public sealed partial class MainWindow : Window
     {
         View.Drives => $"Дисков: {Items.Count(i => i.Kind == ItemKind.Drive)}",
         View.Favorites => $"В избранном: {_settings.Favorites.Count}",
-        _ => $"Элементов: {Items.Count(i => i.Kind != ItemKind.UpDir)}",
+        _ => $"Элементов: {_rawItems.Count}",
     });
 
     private Task ShowInfo(string title, string message) => ShowDialog(title, message);

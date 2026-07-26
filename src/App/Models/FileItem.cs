@@ -5,7 +5,7 @@ using System.IO;
 
 namespace Zip711.Models;
 
-public enum ItemKind { Drive, Folder, Archive, File, UpDir, Favorites }
+public enum ItemKind { Drive, Folder, Archive, File, UpDir, Favorites, Header }
 
 public sealed class FileItem : INotifyPropertyChanged
 {
@@ -95,6 +95,20 @@ public sealed class FileItem : INotifyPropertyChanged
     };
 
     public string ModifiedText => Modified?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "";
+
+    // Lower-case extension (folders/containers have none) — used for Type sort/group.
+    public string Ext => Kind is ItemKind.Folder or ItemKind.Drive or ItemKind.UpDir or ItemKind.Favorites
+        ? "" : Path.GetExtension(Name).ToLowerInvariant();
+
+    // Human type label for the Type column / Type grouping.
+    public string TypeText => Kind switch
+    {
+        ItemKind.Folder => "Папка",
+        ItemKind.Drive => "Диск",
+        ItemKind.Archive => "Архив",
+        ItemKind.UpDir or ItemKind.Favorites or ItemKind.Header => "",
+        _ => Ext.Length > 1 ? $"Файл {Ext.TrimStart('.').ToUpperInvariant()}" : "Файл",
+    };
 
     private static readonly string[] Units = { "Б", "КБ", "МБ", "ГБ", "ТБ" };
     public static string FormatSize(long bytes)

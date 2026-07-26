@@ -27,7 +27,14 @@ public sealed class AppSettings
     public bool ShowHidden { get; set; } = false;
     public bool ConfirmDelete { get; set; } = true;
     public string LastPath { get; set; } = "";              // reopened on next launch
-    public bool GuideShown { get; set; } = false;           // first-run onboarding
+    public bool GuideShown { get; set; } = false;           // first-run onboarding (guide removed; kept for back-compat)
+
+    // View / sort preferences (Explorer-style).
+    public string SortField { get; set; } = "Name";         // Name | Modified | Type | Size
+    public bool SortDescending { get; set; } = false;
+    public string GroupBy { get; set; } = "None";           // None | Type | Modified | Size | Name
+    public string ViewMode { get; set; } = "Details";       // Details | List | LargeIcons | SmallIcons
+    public double IconSize { get; set; } = 48;              // icon-grid glyph size (Ctrl+wheel), 24..96
     public List<string> SearchHistory { get; set; } = new(); // recent search terms (MRU, capped)
     public List<FavoriteEntry> Favorites { get; set; } = new();
 
