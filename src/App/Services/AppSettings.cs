@@ -28,6 +28,7 @@ public sealed class AppSettings
     public bool ConfirmDelete { get; set; } = true;
     public string LastPath { get; set; } = "";              // reopened on next launch
     public bool GuideShown { get; set; } = false;           // first-run onboarding
+    public List<string> SearchHistory { get; set; } = new(); // recent search terms (MRU, capped)
     public List<FavoriteEntry> Favorites { get; set; } = new();
 
     // ---------- Persistence ----------

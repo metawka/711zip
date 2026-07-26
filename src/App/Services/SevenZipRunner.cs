@@ -29,9 +29,9 @@ public sealed class SevenZipRunner
         bool IsDirectory);
 
     /// <summary>Lists the contents of an archive.</summary>
-    public async Task<IReadOnlyList<ArchiveEntry>> ListAsync(string archivePath)
+    public async Task<IReadOnlyList<ArchiveEntry>> ListAsync(string archivePath, string? password = null)
     {
-        var (exit, stdout, stderr) = await RunAsync("l", "-slt", "-sccUTF-8", archivePath);
+        var (exit, stdout, stderr) = await RunAsync("l", "-slt", "-sccUTF-8", $"-p{password ?? ""}", archivePath);
         if (exit != 0)
             throw new InvalidOperationException($"7-Zip не смог прочитать архив (код {exit}).\n{stderr}");
 
@@ -83,13 +83,13 @@ public sealed class SevenZipRunner
     }
 
     /// <summary>Extracts an archive (optionally a subset of entries) into destDir, keeping folder structure.</summary>
-    public async Task ExtractAsync(string archivePath, string destDir, IEnumerable<string>? onlyPaths = null)
+    public async Task ExtractAsync(string archivePath, string destDir, IEnumerable<string>? onlyPaths = null, string? password = null)
     {
         Directory.CreateDirectory(destDir);
-        var args = new List<string> { "x", archivePath, $"-o{destDir}", "-y", "-sccUTF-8" };
+        var args = new List<string> { "x", archivePath, $"-o{destDir}", "-y", "-sccUTF-8", $"-p{password ?? ""}" };
         if (onlyPaths is not null)
             foreach (var p in onlyPaths)
-                args.Add(p); // include filter: literal entry path
+                args.Add($"-i!{p}"); // include switch: unambiguous even for names with @/- or spaces
         var (exit, _, stderr) = await RunAsync(args.ToArray());
         if (exit != 0)
             throw new InvalidOperationException($"Распаковка не удалась (код {exit}).\n{stderr}");
@@ -166,6 +166,7 @@ public sealed class SevenZipRunner
             FileName = ExePath,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = true,
             UseShellExecute = false,
             CreateNoWindow = true,
             StandardOutputEncoding = Encoding.UTF8,
@@ -179,6 +180,7 @@ public sealed class SevenZipRunner
         proc.OutputDataReceived += (_, e) => { if (e.Data is not null) outSb.AppendLine(e.Data); };
         proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) errSb.AppendLine(e.Data); };
         proc.Start();
+        proc.StandardInput.Close(); // never block on a password prompt; a wrong/empty -p fails fast instead
         proc.BeginOutputReadLine();
         proc.BeginErrorReadLine();
         await proc.WaitForExitAsync();

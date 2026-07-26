@@ -53,13 +53,10 @@
                             TextChanged="OnPathTextChanged"
                             QuerySubmitted="OnPathQuerySubmitted"
                             SuggestionChosen="OnPathSuggestionChosen"
+                            LostFocus="OnPathLostFocus"
                             PlaceholderText="Введите путь и нажмите Enter" />
 
             <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
-                <Button x:Name="FavButton" Click="OnOpenFavorites" Padding="9,6"
-                        Background="Transparent" BorderThickness="0" ToolTipService.ToolTip="Избранное">
-                    <PathIcon Data="M8 0.6 L10.1 5.4 L15.3 5.9 L11.4 9.4 L12.6 14.6 L8 11.9 L3.4 14.6 L4.6 9.4 L0.7 5.9 L5.9 5.4 Z" />
-                </Button>
                 <Button x:Name="CompressButton" Click="OnCompress" Padding="10,6" IsEnabled="False"
                         ToolTipService.ToolTip="Добавить в архив">
                     <StackPanel Orientation="Horizontal" Spacing="6">
@@ -77,6 +74,10 @@
             </StackPanel>
 
             <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="2" VerticalAlignment="Center" Margin="6,0,0,0">
+                <Button x:Name="FavButton" Click="OnOpenFavorites" Padding="9,6"
+                        ToolTipService.ToolTip="Избранное" Background="Transparent" BorderThickness="0">
+                    <FontIcon Glyph="&#xE734;" FontSize="14" />
+                </Button>
                 <Button x:Name="SearchButton" Click="OnToggleSearch" Padding="9,6"
                         ToolTipService.ToolTip="Поиск (Ctrl+F)" Background="Transparent" BorderThickness="0">
                     <FontIcon Glyph="&#xE721;" FontSize="14" />
@@ -94,8 +95,10 @@
 
         <!-- Search bar (Ctrl+F) -->
         <Grid Grid.Row="2" x:Name="SearchBar" Padding="16,0,16,8" Visibility="Collapsed">
-            <TextBox x:Name="SearchBox" PlaceholderText="Поиск в текущей папке…"
-                     TextChanged="OnSearchChanged" KeyDown="OnSearchKeyDown" />
+            <AutoSuggestBox x:Name="SearchBox" PlaceholderText="Поиск в текущей папке…"
+                            QueryIcon="Find"
+                            TextChanged="OnSearchChanged" QuerySubmitted="OnSearchSubmitted"
+                            KeyDown="OnSearchKeyDown" />
         </Grid>
 
         <ProgressBar Grid.Row="3" x:Name="Busy" IsIndeterminate="True" Visibility="Collapsed" />

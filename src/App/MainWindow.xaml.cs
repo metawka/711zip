@@ -52,6 +52,13 @@ public sealed partial class MainWindow : Window
     private List<FileItem> _snapshot = new();  // unfiltered items for the current view
     private string _search = "";
 
+    // Canonical text for the path box at the current location, restored if the user
+    // edits the box and clicks away without submitting.
+    private string _locationText = "Этот компьютер";
+
+    // Password for the currently open archive (null = none / not yet asked).
+    private string? _archivePassword;
+
     // Internal clipboard for cut/copy/paste.
     private List<string> _clip = new();
     private bool _clipCut;
@@ -70,7 +77,9 @@ public sealed partial class MainWindow : Window
             presenter.IsAlwaysOnTop = false;
 
         FileList.SelectionChanged += (_, _) => UpdateCommandState();
-        FileList.KeyDown += OnListKeyDown;
+        // handledEventsToo: the ListView marks Space/arrows handled for selection, so a
+        // plain KeyDown subscription never sees Space — this still fires for preview.
+        FileList.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(OnListKeyDown), handledEventsToo: true);
 
         AddAccel(VirtualKey.F, VirtualKeyModifiers.Control, (_, a) => { ToggleSearch(true); a.Handled = true; });
         AddAccel(VirtualKey.R, VirtualKeyModifiers.Control, (_, a) => { RefreshCurrent(); a.Handled = true; });
@@ -201,6 +210,7 @@ public sealed partial class MainWindow : Window
     private void ShowDrives(bool pushHistory = true)
     {
         if (pushHistory) PushCurrent();
+        ClearSearch();
         _view = View.Drives;
         _currentDir = null; _openArchive = null;
         Items.Clear();
@@ -214,7 +224,7 @@ public sealed partial class MainWindow : Window
                 Kind = ItemKind.Drive,
             });
         }
-        PathBox.Text = "Этот компьютер";
+        SetPath("Этот компьютер");
         SetStatus($"Дисков: {Items.Count - 1}");
         UpdateCommandState();
         SnapshotItems();
@@ -223,6 +233,7 @@ public sealed partial class MainWindow : Window
     private void ShowFavorites(bool pushHistory = true)
     {
         if (pushHistory) PushCurrent();
+        ClearSearch();
         _view = View.Favorites;
         _currentDir = null; _openArchive = null;
         Items.Clear();
@@ -240,7 +251,7 @@ public sealed partial class MainWindow : Window
                 Size = exists && f.Kind != ItemKind.Folder ? new FileInfo(f.Path).Length : 0,
             });
         }
-        PathBox.Text = "Избранное";
+        SetPath("Избранное");
         SetStatus($"В избранном: {_settings.Favorites.Count}");
         UpdateCommandState();
         SnapshotItems();
@@ -253,6 +264,7 @@ public sealed partial class MainWindow : Window
             var dir = new DirectoryInfo(path);
             if (!dir.Exists) { ShowDrives(); return; }
             if (pushHistory) PushCurrent();
+            ClearSearch();
 
             _view = View.Folder;
             _currentDir = dir.FullName;
@@ -276,7 +288,7 @@ public sealed partial class MainWindow : Window
                     Size = f.Length, Modified = f.LastWriteTime,
                 });
             }
-            PathBox.Text = dir.FullName;
+            SetPath(dir.FullName);
             SetStatus($"Элементов: {Items.Count - 1}");
             UpdateCommandState();
 
@@ -294,10 +306,21 @@ public sealed partial class MainWindow : Window
         SetBusy(true);
         try
         {
-            var entries = await _engine.ListAsync(archivePath);
+            string? password = null;
+            IReadOnlyList<SevenZipRunner.ArchiveEntry> entries;
+            try { entries = await _engine.ListAsync(archivePath, null); }
+            catch (Exception ex) when (IsPasswordError(ex))
+            {
+                // Header-encrypted archive: names are unreadable without the password.
+                var pw = await AskPasswordAsync();
+                if (pw is null) { SetBusy(false); return; }
+                entries = await _engine.ListAsync(archivePath, pw);
+                password = pw;
+            }
             if (pushHistory) PushCurrent();
             _view = View.Archive;
             _openArchive = archivePath;
+            _archivePassword = password;
             _archiveEntries = entries;
             _archiveSubPath = "";
             RenderArchiveLevel();
@@ -328,6 +351,7 @@ public sealed partial class MainWindow : Window
 
     private void RenderArchiveLevel()
     {
+        ClearSearch();
         Items.Clear();
         Items.Add(new FileItem { Name = "..", FullPath = "..", Kind = ItemKind.UpDir });
         var prefix = _archiveSubPath;
@@ -357,7 +381,7 @@ public sealed partial class MainWindow : Window
         foreach (var f in files.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
             Items.Add(f);
 
-        PathBox.Text = prefix.Length > 0 ? $"{_openArchive}\\{prefix.TrimEnd('\\')}" : _openArchive!;
+        SetPath(prefix.Length > 0 ? $"{_openArchive}\\{prefix.TrimEnd('\\')}" : _openArchive!);
         SetStatus($"Архив: {files.Count} файлов, {folders.Count} папок");
         UpdateCommandState();
         SnapshotItems();
@@ -472,31 +496,59 @@ public sealed partial class MainWindow : Window
 
     private void ToggleSearch(bool show)
     {
-        SearchBar.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
-        if (show) { SearchBox.Focus(FocusState.Programmatic); SearchBox.SelectAll(); }
+        if (show)
+        {
+            SearchBar.Visibility = Visibility.Visible;
+            SearchBox.ItemsSource = _settings.SearchHistory;
+            SearchBox.Focus(FocusState.Programmatic);
+        }
         else
         {
-            SearchBox.Text = "";
-            _search = "";
-            ApplySearch();
+            ClearSearch();
             FileList.Focus(FocusState.Programmatic);
         }
     }
 
-    private void OnSearchChanged(object sender, TextChangedEventArgs e)
+    // Reset the search term and hide the bar; used both on close and on navigation.
+    private void ClearSearch()
     {
-        _search = SearchBox.Text ?? "";
+        _search = "";
+        SearchBar.Visibility = Visibility.Collapsed;
+        if (SearchBox.Text.Length > 0) SearchBox.Text = "";
         ApplySearch();
+    }
+
+    private void OnSearchChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (args.Reason == AutoSuggestionBoxTextChangeReason.ProgrammaticChange) return;
+        _search = sender.Text ?? "";
+        var q = _search.Trim();
+        sender.ItemsSource = q.Length == 0
+            ? _settings.SearchHistory
+            : _settings.SearchHistory.Where(h => h.Contains(q, StringComparison.OrdinalIgnoreCase)).ToList();
+        ApplySearch();
+    }
+
+    private void OnSearchSubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+    {
+        var term = (args.QueryText ?? sender.Text ?? "").Trim();
+        if (term.Length > 0) AddSearchHistory(term);
+        var first = Items.FirstOrDefault(i => i.Kind != ItemKind.UpDir);
+        if (first is not null) FileList.SelectedItem = first;
+    }
+
+    private void AddSearchHistory(string term)
+    {
+        _settings.SearchHistory.RemoveAll(h => string.Equals(h, term, StringComparison.OrdinalIgnoreCase));
+        _settings.SearchHistory.Insert(0, term);
+        if (_settings.SearchHistory.Count > 8)
+            _settings.SearchHistory.RemoveRange(8, _settings.SearchHistory.Count - 8);
+        _settings.Save();
     }
 
     private void OnSearchKeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key == VirtualKey.Escape) { ToggleSearch(false); e.Handled = true; }
-        else if (e.Key == VirtualKey.Enter)
-        {
-            var first = Items.FirstOrDefault(i => i.Kind != ItemKind.UpDir);
-            if (first is not null) { FileList.SelectedItem = first; ActivateItem(first); e.Handled = true; }
-        }
     }
 
     // Store the unfiltered items for the current view, then re-apply any live filter.
@@ -539,6 +591,15 @@ public sealed partial class MainWindow : Window
     private void OnPathSuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
     {
         if (args.SelectedItem is string s) sender.Text = s;
+    }
+
+    // Set the path box and remember it as the canonical text for the current location.
+    private void SetPath(string text) { _locationText = text; PathBox.Text = text; }
+
+    // The user cleared or half-typed a path and clicked away without submitting: snap back.
+    private void OnPathLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (PathBox.Text != _locationText) PathBox.Text = _locationText;
     }
 
     private void OnPathQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
@@ -706,6 +767,38 @@ public sealed partial class MainWindow : Window
 
     // ---------- Extract / Compress ----------
 
+    // 7z reports wrong/absent passwords as a fatal error (code 2) mentioning the password.
+    private static bool IsPasswordError(Exception ex) =>
+        ex.Message.Contains("password", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("код 2)");
+
+    private async Task<string?> AskPasswordAsync()
+    {
+        var box = new PasswordBox { PlaceholderText = "Пароль архива" };
+        var dlg = new ContentDialog
+        {
+            Title = "Требуется пароль", Content = box,
+            PrimaryButtonText = "OK", CloseButtonText = "Отмена",
+            DefaultButton = ContentDialogButton.Primary, XamlRoot = RootGrid.XamlRoot,
+        };
+        if (await dlg.ShowAsync() != ContentDialogResult.Primary) return null;
+        return string.IsNullOrEmpty(box.Password) ? null : box.Password;
+    }
+
+    // Extract, prompting for a password (and retrying once) if the archive turns out
+    // to be encrypted. The working password is remembered for later operations.
+    private async Task ExtractWithPasswordAsync(string archive, string dest, IEnumerable<string>? only)
+    {
+        try { await _engine.ExtractAsync(archive, dest, only, _archivePassword); }
+        catch (Exception ex) when (IsPasswordError(ex))
+        {
+            var pw = await AskPasswordAsync();
+            if (pw is null) throw new OperationCanceledException();
+            await _engine.ExtractAsync(archive, dest, only, pw);
+            _archivePassword = pw;
+        }
+    }
+
     private async void OnExtract(object sender, RoutedEventArgs e)
     {
         try
@@ -734,10 +827,14 @@ public sealed partial class MainWindow : Window
             var dest = Path.Combine(Path.GetDirectoryName(archive)!, name);
 
             SetBusy(true);
-            await _engine.ExtractAsync(archive, dest, only);
+            if (_view == View.Archive)
+                await ExtractWithPasswordAsync(archive, dest, only);
+            else
+                await _engine.ExtractAsync(archive, dest, only);
             SetBusy(false);
             await ShowInfo("Готово", $"Распаковано в:\n{dest}");
         }
+        catch (OperationCanceledException) { SetBusy(false); }
         catch (Exception ex)
         {
             SetBusy(false);
@@ -1056,27 +1153,8 @@ public sealed partial class MainWindow : Window
 
         e.Data.RequestedOperation = DataPackageOperation.Copy;
 
-        if (_view is View.Folder or View.Favorites)
-        {
-            try
-            {
-                var items = new List<IStorageItem>();
-                foreach (var i in sel)
-                {
-                    if (Directory.Exists(i.FullPath))
-                        items.Add(StorageFolder.GetFolderFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
-                    else if (File.Exists(i.FullPath))
-                        items.Add(StorageFile.GetFileFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
-                }
-                if (items.Count == 0) { e.Cancel = true; return; }
-                e.Data.SetStorageItems(items, readOnly: false);
-                e.DragUI.SetContentFromDataPackage(); // compact OS file icon, not the row strip
-            }
-            catch { e.Cancel = true; }
-            return;
-        }
-
-        // Archive view: extract to temp first (needs a deferral).
+        // Always defer + await: resolving StorageItems (and, for archives, extracting to
+        // temp) synchronously on the UI thread deadlocks and the drag never starts.
         var def = e.GetDeferral();
         try
         {
@@ -1084,7 +1162,7 @@ public sealed partial class MainWindow : Window
             if (items.Count > 0)
             {
                 e.Data.SetStorageItems(items, readOnly: false);
-                e.DragUI.SetContentFromDataPackage();
+                e.DragUI.SetContentFromDataPackage(); // compact OS file icon, not the row strip
             }
             else e.Cancel = true;
         }
@@ -1099,7 +1177,7 @@ public sealed partial class MainWindow : Window
         {
             var temp = Path.Combine(Path.GetTempPath(), "711zip_drag", Guid.NewGuid().ToString("N"));
             var include = sel.Select(i => i.Kind == ItemKind.Folder ? i.FullPath + "\\*" : i.FullPath).ToList();
-            await _engine.ExtractAsync(_openArchive, temp, include);
+            await _engine.ExtractAsync(_openArchive, temp, include, _archivePassword);
             foreach (var i in sel)
             {
                 var outPath = Path.Combine(temp, i.FullPath);
@@ -1184,11 +1262,12 @@ public sealed partial class MainWindow : Window
         {
             var temp = Path.Combine(Path.GetTempPath(), "711zip_view", Guid.NewGuid().ToString("N"));
             SetBusy(true);
-            await _engine.ExtractAsync(_openArchive, temp, new[] { item.FullPath });
+            await ExtractWithPasswordAsync(_openArchive, temp, new[] { item.FullPath });
             SetBusy(false);
             var outPath = Path.Combine(temp, item.FullPath);
             if (File.Exists(outPath)) await PreviewPathAsync(outPath, item.Name);
         }
+        catch (OperationCanceledException) { SetBusy(false); }
         catch (Exception ex) { SetBusy(false); await ShowError("Не удалось открыть файл", ex.Message); }
     }
 
@@ -1199,11 +1278,12 @@ public sealed partial class MainWindow : Window
         {
             var temp = Path.Combine(Path.GetTempPath(), "711zip_view", Guid.NewGuid().ToString("N"));
             SetBusy(true);
-            await _engine.ExtractAsync(_openArchive, temp, new[] { item.FullPath });
+            await ExtractWithPasswordAsync(_openArchive, temp, new[] { item.FullPath });
             SetBusy(false);
             var outPath = Path.Combine(temp, item.FullPath);
             if (File.Exists(outPath)) await OpenArchiveAsync(outPath);
         }
+        catch (OperationCanceledException) { SetBusy(false); }
         catch (Exception ex) { SetBusy(false); await ShowError("Не удалось открыть архив", ex.Message); }
     }
 
@@ -1247,12 +1327,15 @@ public sealed partial class MainWindow : Window
         {
             if (VideoExts.Contains(ext) || AudioExts.Contains(ext))
             {
+                bool isAudio = AudioExts.Contains(ext);
                 var mpe = new MediaPlayerElement
                 {
                     AutoPlay = true, AreTransportControlsEnabled = true,
                     Source = Windows.Media.Core.MediaSource.CreateFromUri(new Uri(path)),
-                    Width = AudioExts.Contains(ext) ? 480 : 720,
-                    Height = AudioExts.Contains(ext) ? 80 : 440,
+                    Width = isAudio ? 560 : 720,
+                    Height = isAudio ? 160 : 440,
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Center,
                 };
                 var dlg = new ContentDialog
                 {
@@ -1275,16 +1358,20 @@ public sealed partial class MainWindow : Window
             }
             if (TextExts.Contains(ext) || new FileInfo(path).Length <= 256 * 1024)
             {
-                const int cap = 512 * 1024;
-                string text;
-                using (var fs = File.OpenRead(path))
+                const int maxLines = 100;
+                var lines = new List<string>();
+                bool more = false;
+                using (var reader = new StreamReader(path, System.Text.Encoding.UTF8, detectEncodingFromByteOrderMarks: true))
                 {
-                    var len = (int)Math.Min(fs.Length, cap);
-                    var buf = new byte[len];
-                    _ = await fs.ReadAsync(buf.AsMemory(0, len));
-                    text = System.Text.Encoding.UTF8.GetString(buf);
-                    if (fs.Length > cap) text += "\n\n… (файл обрезан для предпросмотра)";
+                    string? line;
+                    while ((line = await reader.ReadLineAsync()) is not null)
+                    {
+                        if (lines.Count >= maxLines) { more = true; break; }
+                        lines.Add(line);
+                    }
                 }
+                var text = string.Join(Environment.NewLine, lines);
+                if (more) text += Environment.NewLine + "…";
                 var tb = new TextBox
                 {
                     Text = text, IsReadOnly = true, TextWrapping = TextWrapping.NoWrap,

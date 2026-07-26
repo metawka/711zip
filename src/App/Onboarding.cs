@@ -86,7 +86,12 @@ internal static class Onboarding
 
     private static UIElement Page(int glyph, string title, params string[] bullets)
     {
-        var panel = new StackPanel { Spacing = 14, Padding = new Thickness(24, 12, 24, 12) };
+        var panel = new StackPanel
+        {
+            Spacing = 14, Padding = new Thickness(24, 12, 24, 12),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
 
         var badge = new Border
         {
