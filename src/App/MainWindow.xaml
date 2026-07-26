@@ -5,7 +5,8 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:models="using:Zip711.Models">
 
-    <Grid x:Name="RootGrid" RowSpacing="0" PointerPressed="OnRootPointerPressed">
+    <Grid x:Name="RootGrid" RowSpacing="0" PointerPressed="OnRootPointerPressed"
+          KeyboardAcceleratorPlacementMode="Hidden">
         <Grid.RowDefinitions>
             <RowDefinition Height="40" />
             <RowDefinition Height="Auto" />
@@ -152,11 +153,14 @@
                       IsDoubleTapEnabled="True"
                       RightTapped="OnListRightTapped"
                       AllowDrop="True"
-                      CanDragItems="True"
+                      CanDragItems="False"
                       CanReorderItems="False"
-                      DragItemsStarting="OnDragItemsStarting"
                       DragOver="OnListDragOver"
-                      Drop="OnListDrop">
+                      Drop="OnListDrop"
+                      PointerPressed="OnListPointerPressed"
+                      PointerMoved="OnListPointerMoved"
+                      PointerReleased="OnListPointerReleased"
+                      PointerCaptureLost="OnListPointerReleased">
                 <ListView.ItemContainerStyle>
                     <Style TargetType="ListViewItem">
                         <Setter Property="Padding" Value="8,2" />
@@ -172,7 +176,8 @@
                                 <ColumnDefinition Width="{Binding SizeLen, Source={StaticResource Cols}}" />
                                 <ColumnDefinition Width="{Binding ModifiedLen, Source={StaticResource Cols}}" />
                             </Grid.ColumnDefinitions>
-                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12">
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12"
+                                        CanDrag="True" DragStarting="OnItemDragStarting">
                                 <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" VerticalAlignment="Center"
                                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                                 <StackPanel VerticalAlignment="Center">
@@ -182,7 +187,7 @@
                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                                 </StackPanel>
                             </StackPanel>
-                            <TextBlock Grid.Column="1" Text="{x:Bind SizeText}" VerticalAlignment="Center"
+                            <TextBlock Grid.Column="1" Text="{x:Bind SizeText, Mode=OneWay}" VerticalAlignment="Center"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                             <TextBlock Grid.Column="2" Text="{x:Bind ModifiedText}" VerticalAlignment="Center"
                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
@@ -190,6 +195,16 @@
                     </DataTemplate>
                 </ListView.ItemTemplate>
             </ListView>
+
+            <!-- Rubber-band (marquee) selection rectangle, drawn over the list when
+                 the user click-drags from empty space. Non-hit-testable so it never
+                 swallows the pointer events driving it. -->
+            <Canvas Grid.Row="1" x:Name="MarqueeLayer" IsHitTestVisible="False">
+                <Border x:Name="MarqueeRect" Visibility="Collapsed"
+                        Background="{ThemeResource AccentFillColorSelectedTextBackgroundBrush}"
+                        BorderThickness="1" BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                        Opacity="0.5" />
+            </Canvas>
         </Grid>
 
         <!-- Status bar -->
@@ -198,5 +213,35 @@
             <TextBlock x:Name="StatusText" Style="{ThemeResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
         </Border>
+
+        <!-- Modal progress overlay (extract / compress / add). Dims the window and
+             blocks input while a long 7z operation runs; Cancel kills the process. -->
+        <Grid x:Name="ProgressOverlay" Grid.Row="0" Grid.RowSpan="6"
+              Background="#99000000" Visibility="Collapsed" Canvas.ZIndex="10">
+            <Border MinWidth="360" MaxWidth="440" Padding="24" CornerRadius="8"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="{ThemeResource LayerFillColorDefaultBrush}"
+                    BorderThickness="1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
+                <StackPanel Spacing="12">
+                    <TextBlock x:Name="ProgressTitle" Text="Обработка…"
+                               Style="{ThemeResource SubtitleTextBlockStyle}" />
+                    <ProgressBar x:Name="ProgressBarCtl" Minimum="0" Maximum="100" Value="0" />
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0" x:Name="ProgressPercent" Text="0%"
+                                   FontWeight="SemiBold" />
+                        <TextBlock Grid.Column="1" x:Name="ProgressSize" Text="" TextAlignment="Right"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </Grid>
+                    <TextBlock x:Name="ProgressTime" Text=""
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <Button x:Name="ProgressCancel" Content="Отмена" Click="OnProgressCancel"
+                            HorizontalAlignment="Right" />
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

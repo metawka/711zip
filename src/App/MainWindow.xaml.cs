@@ -63,6 +63,9 @@ public sealed partial class MainWindow : Window
     private List<string> _clip = new();
     private bool _clipCut;
 
+    // Cancels the background folder-size pass when the user navigates away.
+    private System.Threading.CancellationTokenSource? _sizeCts;
+
     public MainWindow()
     {
         this.InitializeComponent();
@@ -212,6 +215,7 @@ public sealed partial class MainWindow : Window
     {
         if (pushHistory) PushCurrent();
         ClearSearch();
+        CancelFolderSizing();
         _view = View.Drives;
         _currentDir = null; _openArchive = null;
         Items.Clear();
@@ -235,6 +239,7 @@ public sealed partial class MainWindow : Window
     {
         if (pushHistory) PushCurrent();
         ClearSearch();
+        CancelFolderSizing();
         _view = View.Favorites;
         _currentDir = null; _openArchive = null;
         Items.Clear();
@@ -267,6 +272,7 @@ public sealed partial class MainWindow : Window
             if (pushHistory) PushCurrent();
             ClearSearch();
 
+            CancelFolderSizing();
             _view = View.Folder;
             _currentDir = dir.FullName;
             _openArchive = null;
@@ -295,11 +301,63 @@ public sealed partial class MainWindow : Window
 
             if (_settings.LastPath != dir.FullName) { _settings.LastPath = dir.FullName; _settings.Save(); }
             SnapshotItems();
+            StartFolderSizing();
         }
         catch (Exception ex)
         {
             _ = ShowError("Не удалось открыть папку", ex.Message);
         }
+    }
+
+    private void CancelFolderSizing()
+    {
+        _sizeCts?.Cancel();
+        _sizeCts?.Dispose();
+        _sizeCts = null;
+    }
+
+    // Computes recursive folder sizes off the UI thread and pushes each result back
+    // as it lands, so the list stays responsive on directories with huge subtrees.
+    private void StartFolderSizing()
+    {
+        var folders = Items.Where(i => i.Kind == ItemKind.Folder).ToList();
+        if (folders.Count == 0) return;
+
+        _sizeCts = new System.Threading.CancellationTokenSource();
+        var token = _sizeCts.Token;
+        var dq = DispatcherQueue;
+
+        Task.Run(() =>
+        {
+            foreach (var f in folders)
+            {
+                if (token.IsCancellationRequested) return;
+                long total = DirectorySize(f.FullPath, token);
+                if (token.IsCancellationRequested) return;
+                dq.TryEnqueue(() => { if (!token.IsCancellationRequested) f.FolderSize = total; });
+            }
+        }, token);
+    }
+
+    private static long DirectorySize(string path, System.Threading.CancellationToken token)
+    {
+        long total = 0;
+        try
+        {
+            var opts = new EnumerationOptions
+            {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+                AttributesToSkip = System.IO.FileAttributes.ReparsePoint, // don't follow junctions/symlinks
+            };
+            foreach (var file in new DirectoryInfo(path).EnumerateFiles("*", opts))
+            {
+                if (token.IsCancellationRequested) break;
+                total += file.Length;
+            }
+        }
+        catch { /* size stays at what we managed to sum */ }
+        return total;
     }
 
     private async Task OpenArchiveAsync(string archivePath, bool pushHistory = true)
@@ -319,6 +377,7 @@ public sealed partial class MainWindow : Window
                 password = pw;
             }
             if (pushHistory) PushCurrent();
+            CancelFolderSizing();
             _view = View.Archive;
             _openArchive = archivePath;
             _archivePassword = password;
@@ -803,17 +862,22 @@ public sealed partial class MainWindow : Window
 
     // Extract, prompting for a password (and retrying until correct or cancelled) if the
     // archive turns out to be encrypted. The working password is remembered.
-    private async Task ExtractWithPasswordAsync(string archive, string dest, IEnumerable<string>? only, string? initial)
+    private async Task ExtractWithPasswordAsync(string archive, string dest, IEnumerable<string>? only, string? initial,
+        IProgress<int>? progress = null, System.Threading.CancellationToken ct = default)
     {
         var pw = initial;
         while (true)
         {
-            try { await _engine.ExtractAsync(archive, dest, only, pw); return; }
+            try { await _engine.ExtractAsync(archive, dest, only, pw, progress, ct); return; }
             catch (Exception ex) when (IsPasswordError(ex))
             {
+                // Hide the overlay while the (modal) password dialog is up, then restore it.
+                bool wasVisible = ProgressOverlay.Visibility == Visibility.Visible;
+                if (wasVisible) ProgressOverlay.Visibility = Visibility.Collapsed;
                 pw = await AskPasswordAsync();
                 if (pw is null) throw new OperationCanceledException();
                 _archivePassword = pw;
+                if (wasVisible) ProgressOverlay.Visibility = Visibility.Visible;
             }
         }
     }
@@ -824,13 +888,16 @@ public sealed partial class MainWindow : Window
         {
             string archive;
             IEnumerable<string>? only = null;
+            long totalBytes;
+            List<FileItem> archiveSel = new();
 
             if (_view == View.Archive && _openArchive is not null)
             {
                 archive = _openArchive;
-                var sel = FileList.SelectedItems.OfType<FileItem>().Where(i => i.Kind != ItemKind.UpDir).ToList();
-                if (sel.Count > 0)
-                    only = sel.Select(i => i.Kind == ItemKind.Folder ? i.FullPath + "\\*" : i.FullPath).ToList();
+                archiveSel = FileList.SelectedItems.OfType<FileItem>().Where(i => i.Kind != ItemKind.UpDir).ToList();
+                if (archiveSel.Count > 0)
+                    only = archiveSel.Select(i => i.Kind == ItemKind.Folder ? i.FullPath + "\\*" : i.FullPath).ToList();
+                totalBytes = ArchiveSelectionSize(archiveSel);
             }
             else
             {
@@ -840,22 +907,72 @@ public sealed partial class MainWindow : Window
                     return;
                 }
                 archive = fi.FullPath;
+                totalBytes = 0; // resolved after we know the password (below)
             }
 
-            var name = Path.GetFileNameWithoutExtension(archive);
-            var dest = Path.Combine(Path.GetDirectoryName(archive)!, name);
+            // Ask where to extract instead of silently dropping next to the archive.
+            var dest = await PickFolderAsync();
+            if (dest is null) return; // cancelled the picker
 
-            SetBusy(true);
-            await ExtractWithPasswordAsync(archive, dest, only, _view == View.Archive ? _archivePassword : null);
-            SetBusy(false);
+            // For a standalone archive we can now read its total weight for the size
+            // read-out (best effort — an encrypted listing simply leaves it unknown).
+            if (_view != View.Archive)
+            {
+                try
+                {
+                    var entries = await _engine.ListAsync(archive, null);
+                    totalBytes = entries.Where(en => !en.IsDirectory).Sum(en => en.Size);
+                }
+                catch { totalBytes = 0; }
+            }
+
+            var (progress, token) = BeginProgress("Распаковка…", totalBytes);
+            await ExtractWithPasswordAsync(archive, dest, only, _view == View.Archive ? _archivePassword : null, progress, token);
+            EndProgress();
             await ShowInfo("Готово", $"Распаковано в:\n{dest}");
         }
-        catch (OperationCanceledException) { SetBusy(false); }
+        catch (OperationCanceledException) { EndProgress(); }
         catch (Exception ex)
         {
-            SetBusy(false);
+            EndProgress();
             await ShowError("Ошибка распаковки", ex.Message);
         }
+    }
+
+    // Uncompressed weight of a selection inside the open archive (empty selection = whole archive).
+    private long ArchiveSelectionSize(IReadOnlyList<FileItem> sel)
+    {
+        if (_archiveEntries.Count == 0) return 0;
+        if (sel.Count == 0) return _archiveEntries.Where(en => !en.IsDirectory).Sum(en => en.Size);
+
+        long total = 0;
+        foreach (var i in sel)
+        {
+            if (i.Kind == ItemKind.Folder)
+            {
+                var prefix = i.FullPath + "\\";
+                total += _archiveEntries.Where(en => !en.IsDirectory && en.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).Sum(en => en.Size);
+            }
+            else
+            {
+                var match = _archiveEntries.FirstOrDefault(en => string.Equals(en.Path, i.FullPath, StringComparison.OrdinalIgnoreCase));
+                if (match is not null) total += match.Size;
+            }
+        }
+        return total;
+    }
+
+    // Shows the system folder picker; returns null if cancelled.
+    private async Task<string?> PickFolderAsync()
+    {
+        var picker = new Windows.Storage.Pickers.FolderPicker
+        {
+            SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.ComputerFolder,
+        };
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, WinRT.Interop.WindowNative.GetWindowHandle(this));
+        var folder = await picker.PickSingleFolderAsync();
+        return folder?.Path;
     }
 
     private async void OnCompress(object sender, RoutedEventArgs e)
@@ -875,20 +992,21 @@ public sealed partial class MainWindow : Window
         var (name, format, level, password, destDir) = opts.Value;
         var archivePath = Path.Combine(destDir, $"{name}.{format}");
 
-        SetBusy(true);
         try
         {
             Directory.CreateDirectory(destDir);
-            await _engine.CreateAsync(archivePath, sources, format, level, password);
+            var (progress, token) = BeginProgress("Сжатие…", TotalPathsSize(sources));
+            await _engine.CreateAsync(archivePath, sources, format, level, password, progress, token);
             _settings.DefaultFormat = format; _settings.DefaultLevel = level; _settings.Save();
-            SetBusy(false);
+            EndProgress();
             if (string.Equals(destDir.TrimEnd('\\'), _currentDir.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
                 NavigateToFolder(_currentDir, pushHistory: false);
             await ShowInfo("Готово", $"Создан архив:\n{archivePath}");
         }
+        catch (OperationCanceledException) { EndProgress(); }
         catch (Exception ex)
         {
-            SetBusy(false);
+            EndProgress();
             await ShowError("Ошибка сжатия", ex.Message);
         }
     }
@@ -1145,54 +1263,62 @@ public sealed partial class MainWindow : Window
 
     // ---------- Drag & drop ----------
 
-    // Drag files/folders (or archive entries) out of the app. Uses the ListView's own
-    // DragItemsStarting — per-item ListViewItem.CanDrag never actually initiates a drag
-    // while the ListView's CanDragItems is false, which is why dragging did nothing.
-    private void OnDragItemsStarting(object sender, DragItemsStartingEventArgs e)
+    // Drag files/folders (or archive entries) out of the app. Initiated at element
+    // level on the row's icon+name panel (not the ListView's row-level drag): that
+    // panel sizes to its content, so the framework's drag snapshot is a small
+    // Explorer-style icon+label instead of a full-width row bar. DragStartingEventArgs
+    // (unlike DragItemsStartingEventArgs) also exposes DragUI and a real deferral, so
+    // archive entries can be extracted before the drop rather than via unreliable
+    // delayed rendering.
+    private void OnItemDragStarting(UIElement sender, DragStartingEventArgs args)
     {
-        var sel = e.Items.OfType<FileItem>()
+        if (sender is not FrameworkElement fe || fe.DataContext is not FileItem clicked) { args.Cancel = true; return; }
+
+        // Drag the whole selection when the grabbed row is part of it; else just it.
+        var selected = FileList.SelectedItems.OfType<FileItem>().ToList();
+        var sel = (selected.Contains(clicked) ? selected : new List<FileItem> { clicked })
             .Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites).ToList();
-        if (sel.Count == 0 || _view is View.Drives) { e.Cancel = true; return; }
+        if (sel.Count == 0 || _view is View.Drives) { args.Cancel = true; return; }
 
-        e.Data.RequestedOperation = DataPackageOperation.Copy;
+        args.Data.RequestedOperation = DataPackageOperation.Copy;
 
-        // On-disk items (Folder/Favorites view) resolve synchronously and are set
-        // directly — this is the path Explorer honours as an external drop target.
-        // DragItemsStartingEventArgs has no deferral, so archive entries (which need
-        // extraction) fall back to delayed rendering.
         if (_view == View.Archive && _openArchive is not null)
         {
             var archive = _openArchive;
             var pw = _archivePassword;
-            e.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
-            {
-                var def = request.GetDeferral();
-                try
-                {
-                    var items = await BuildArchiveDragItemsAsync(archive, pw, sel);
-                    request.SetData(items);
-                }
-                catch { /* drop target simply gets nothing */ }
-                finally { def.Complete(); }
-            });
+            var def = args.GetDeferral();
+            _ = ExtractForDragAsync(archive, pw, sel, args.Data, def);
         }
         else
         {
             var list = new List<IStorageItem>();
-            try
+            // Resolve each item independently: a single unreadable entry (e.g. a
+            // shortcut the broker refuses) must not drop the rest of the selection.
+            foreach (var i in sel)
             {
-                foreach (var i in sel)
+                try
                 {
                     if (Directory.Exists(i.FullPath))
                         list.Add(StorageFolder.GetFolderFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
                     else if (File.Exists(i.FullPath))
                         list.Add(StorageFile.GetFileFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
                 }
+                catch { /* this item is skipped; others still drag */ }
             }
-            catch { /* unreadable item is simply skipped */ }
-            if (list.Count > 0) e.Data.SetStorageItems(list, readOnly: false);
-            else e.Cancel = true;
+            if (list.Count > 0) args.Data.SetStorageItems(list, readOnly: false);
+            else args.Cancel = true;
         }
+    }
+
+    private async Task ExtractForDragAsync(string archive, string? pw, List<FileItem> sel, DataPackage data, DragOperationDeferral def)
+    {
+        try
+        {
+            var items = await BuildArchiveDragItemsAsync(archive, pw, sel);
+            if (items.Count > 0) data.SetStorageItems(items, readOnly: false);
+        }
+        catch { /* drop target simply gets nothing */ }
+        finally { def.Complete(); }
     }
 
     private async Task<List<IStorageItem>> BuildArchiveDragItemsAsync(string archive, string? pw, List<FileItem> sel)
@@ -1240,7 +1366,10 @@ public sealed partial class MainWindow : Window
 
             if (_view == View.Archive && _openArchive is not null)
             {
-                SetBusy(true); await _engine.AddAsync(_openArchive, paths); await ReloadArchiveAsync(); SetBusy(false);
+                var (progress, token) = BeginProgress("Добавление в архив…", TotalPathsSize(paths));
+                await _engine.AddAsync(_openArchive, paths, progress, token);
+                await ReloadArchiveAsync();
+                EndProgress();
             }
             else if (_view == View.Folder && _currentDir is not null)
             {
@@ -1262,7 +1391,8 @@ public sealed partial class MainWindow : Window
                 foreach (var p in paths) AddFavoritePath(p);
             }
         }
-        catch (Exception ex) { SetBusy(false); await ShowError("Не удалось принять перетаскивание", ex.Message); }
+        catch (OperationCanceledException) { EndProgress(); }
+        catch (Exception ex) { SetBusy(false); EndProgress(); await ShowError("Не удалось принять перетаскивание", ex.Message); }
         finally { def.Complete(); }
     }
 
@@ -1596,6 +1726,172 @@ public sealed partial class MainWindow : Window
 
     private void SetBusy(bool busy) => Busy.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
     private void SetStatus(string text) => StatusText.Text = text;
+
+    // ---------- Rubber-band (marquee) selection ----------
+
+    private bool _marqueeActive;
+    private Point _marqueeStart;
+    private List<FileItem> _marqueeBase = new(); // selection present when the drag began (for Ctrl-add)
+    private bool _marqueeAdditive;
+
+    // Start a marquee only from empty space: a press that lands on a row must keep the
+    // ListView's own click/Shift/Ctrl selection and drag behaviour untouched.
+    private void OnListPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        var pt = e.GetCurrentPoint(FileList);
+        if (!pt.Properties.IsLeftButtonPressed) return;
+        if (e.OriginalSource is DependencyObject src && FindAncestor<ListViewItem>(src) is not null) return; // on a row
+
+        _marqueeAdditive = (e.KeyModifiers & VirtualKeyModifiers.Control) != 0;
+        _marqueeBase = _marqueeAdditive ? FileList.SelectedItems.OfType<FileItem>().ToList() : new List<FileItem>();
+        if (!_marqueeAdditive) FileList.SelectedItems.Clear();
+
+        _marqueeActive = true;
+        _marqueeStart = e.GetCurrentPoint(MarqueeLayer).Position;
+        Canvas.SetLeft(MarqueeRect, _marqueeStart.X);
+        Canvas.SetTop(MarqueeRect, _marqueeStart.Y);
+        MarqueeRect.Width = 0;
+        MarqueeRect.Height = 0;
+        MarqueeRect.Visibility = Visibility.Visible;
+        FileList.CapturePointer(e.Pointer);
+    }
+
+    private void OnListPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_marqueeActive) return;
+        var p = e.GetCurrentPoint(MarqueeLayer).Position;
+        double x = Math.Min(p.X, _marqueeStart.X);
+        double y = Math.Min(p.Y, _marqueeStart.Y);
+        double w = Math.Abs(p.X - _marqueeStart.X);
+        double h = Math.Abs(p.Y - _marqueeStart.Y);
+        Canvas.SetLeft(MarqueeRect, x);
+        Canvas.SetTop(MarqueeRect, y);
+        MarqueeRect.Width = w;
+        MarqueeRect.Height = h;
+
+        var box = new Rect(x, y, w, h);
+        var hits = new HashSet<FileItem>(_marqueeBase);
+        foreach (var item in Items)
+        {
+            if (item.Kind == ItemKind.UpDir) continue;
+            if (FileList.ContainerFromItem(item) is not ListViewItem lvi) continue;
+            var b = lvi.TransformToVisual(MarqueeLayer).TransformBounds(new Rect(0, 0, lvi.ActualWidth, lvi.ActualHeight));
+            if (IntersectsVertically(box, b)) hits.Add(item);
+        }
+
+        // Reconcile the ListView selection with the hit set (avoid clearing/re-adding
+        // everything each move, which would flicker and reset the anchor).
+        var current = FileList.SelectedItems.OfType<FileItem>().ToHashSet();
+        foreach (var it in current.Where(c => !hits.Contains(c)).ToList()) FileList.SelectedItems.Remove(it);
+        foreach (var it in hits.Where(hh => !current.Contains(hh))) FileList.SelectedItems.Add(it);
+    }
+
+    private void OnListPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        if (!_marqueeActive) return;
+        _marqueeActive = false;
+        MarqueeRect.Visibility = Visibility.Collapsed;
+        FileList.ReleasePointerCapture(e.Pointer);
+    }
+
+    // A row counts as selected when the marquee overlaps its vertical band — the list is
+    // a single column, so horizontal overlap is implied and vertical overlap is enough.
+    private static bool IntersectsVertically(Rect marquee, Rect row) =>
+        marquee.Top <= row.Bottom && marquee.Bottom >= row.Top && marquee.Height > 0;
+
+    private static T? FindAncestor<T>(DependencyObject node) where T : class
+    {
+        while (node is not null)
+        {
+            if (node is T t) return t;
+            node = VisualTreeHelper.GetParent(node);
+        }
+        return null;
+    }
+
+    // ---------- Modal progress overlay ----------
+
+    private System.Threading.CancellationTokenSource? _progressCts;
+
+    // Shows the overlay and returns the reporter + token to hand to the engine.
+    // Progress<int> posts back to the UI thread it is created on (here). 7z reports
+    // only an overall percentage, so the processed weight and the elapsed / remaining
+    // time are derived here from that percentage, a Stopwatch, and the known total size
+    // (0 = unknown, in which case only the percentage line is shown).
+    private (IProgress<int> progress, System.Threading.CancellationToken token) BeginProgress(string title, long totalBytes = 0)
+    {
+        _progressCts = new System.Threading.CancellationTokenSource();
+        ProgressTitle.Text = title;
+        ProgressBarCtl.Value = 0;
+        ProgressBarCtl.IsIndeterminate = true; // spin until the first % lands
+        ProgressPercent.Text = "";
+        ProgressSize.Text = "";
+        ProgressTime.Text = "";
+        ProgressCancel.IsEnabled = true;
+        ProgressOverlay.Visibility = Visibility.Visible;
+
+        var sw = Stopwatch.StartNew();
+        var progress = new Progress<int>(pct =>
+        {
+            ProgressBarCtl.IsIndeterminate = false;
+            ProgressBarCtl.Value = pct;
+            ProgressPercent.Text = $"{pct}%";
+
+            if (totalBytes > 0)
+            {
+                long done = (long)(totalBytes * (pct / 100.0));
+                ProgressSize.Text = $"{FileItem.FormatSize(done)} из {FileItem.FormatSize(totalBytes)}";
+            }
+
+            var elapsed = sw.Elapsed;
+            if (pct is > 0 and < 100)
+            {
+                var remaining = TimeSpan.FromSeconds(elapsed.TotalSeconds / pct * (100 - pct));
+                ProgressTime.Text = $"Прошло {FormatDuration(elapsed)} · осталось ~{FormatDuration(remaining)}";
+            }
+            else
+            {
+                ProgressTime.Text = $"Прошло {FormatDuration(elapsed)}";
+            }
+        });
+        return (progress, _progressCts.Token);
+    }
+
+    private static string FormatDuration(TimeSpan t)
+    {
+        if (t.TotalHours >= 1) return $"{(int)t.TotalHours}:{t.Minutes:00}:{t.Seconds:00}";
+        return $"{t.Minutes}:{t.Seconds:00}";
+    }
+
+    // Total uncompressed weight of on-disk paths (files summed directly, folders walked).
+    private static long TotalPathsSize(IEnumerable<string> paths)
+    {
+        long total = 0;
+        foreach (var p in paths)
+        {
+            try
+            {
+                if (File.Exists(p)) total += new FileInfo(p).Length;
+                else if (Directory.Exists(p)) total += DirectorySize(p, System.Threading.CancellationToken.None);
+            }
+            catch { }
+        }
+        return total;
+    }
+
+    private void EndProgress()
+    {
+        ProgressOverlay.Visibility = Visibility.Collapsed;
+        _progressCts?.Dispose();
+        _progressCts = null;
+    }
+
+    private void OnProgressCancel(object sender, RoutedEventArgs e)
+    {
+        _progressCts?.Cancel();
+        ProgressCancel.IsEnabled = false;
+        ProgressPercent.Text = "Отмена…";
+    }
 
     private Microsoft.UI.Dispatching.DispatcherQueueTimer? _statusTimer;
 

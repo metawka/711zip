@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Zip711.Services;
@@ -11,7 +13,7 @@ namespace Zip711.Services;
 /// Thin wrapper around the bundled 7z.exe. Listing uses "-slt" (technical
 /// listing, one "Key = Value" per line) which is stable and easy to parse.
 /// </summary>
-public sealed class SevenZipRunner
+public sealed partial class SevenZipRunner
 {
     public string ExePath { get; }
 
@@ -83,14 +85,15 @@ public sealed class SevenZipRunner
     }
 
     /// <summary>Extracts an archive (optionally a subset of entries) into destDir, keeping folder structure.</summary>
-    public async Task ExtractAsync(string archivePath, string destDir, IEnumerable<string>? onlyPaths = null, string? password = null)
+    public async Task ExtractAsync(string archivePath, string destDir, IEnumerable<string>? onlyPaths = null, string? password = null,
+        IProgress<int>? progress = null, CancellationToken ct = default)
     {
         Directory.CreateDirectory(destDir);
         var args = new List<string> { "x", archivePath, $"-o{destDir}", "-y", "-sccUTF-8", $"-p{password ?? ""}" };
         if (onlyPaths is not null)
             foreach (var p in onlyPaths)
                 args.Add($"-i!{p}"); // include switch: unambiguous even for names with @/- or spaces
-        var (exit, _, stderr) = await RunAsync(args.ToArray());
+        var (exit, stderr) = await RunWithProgressAsync(args, progress, ct);
         if (exit != 0)
             throw new InvalidOperationException($"Распаковка не удалась (код {exit}).\n{stderr}");
     }
@@ -101,7 +104,9 @@ public sealed class SevenZipRunner
         IEnumerable<string> sources,
         string format = "7z",
         int level = 5,
-        string? password = null)
+        string? password = null,
+        IProgress<int>? progress = null,
+        CancellationToken ct = default)
     {
         var args = new List<string> { "a", $"-t{format}", $"-mx={level}", "-y", "-sccUTF-8" };
         if (!string.IsNullOrEmpty(password))
@@ -114,7 +119,7 @@ public sealed class SevenZipRunner
         args.Add("--"); // stop switch parsing; everything after is a path
         foreach (var s in sources) args.Add(s);
 
-        var (exit, _, stderr) = await RunAsync(args.ToArray());
+        var (exit, stderr) = await RunWithProgressAsync(args, progress, ct);
         if (exit != 0)
             throw new InvalidOperationException($"Не удалось создать архив (код {exit}).\n{stderr}");
     }
@@ -129,11 +134,12 @@ public sealed class SevenZipRunner
     }
 
     /// <summary>Adds files/folders into an existing archive; format is inferred from its extension.</summary>
-    public async Task AddAsync(string archivePath, IEnumerable<string> sources)
+    public async Task AddAsync(string archivePath, IEnumerable<string> sources,
+        IProgress<int>? progress = null, CancellationToken ct = default)
     {
         var args = new List<string> { "a", "-y", "-sccUTF-8", archivePath, "--" };
         foreach (var s in sources) args.Add(s);
-        var (exit, _, stderr) = await RunAsync(args.ToArray());
+        var (exit, stderr) = await RunWithProgressAsync(args, progress, ct);
         if (exit != 0)
             throw new InvalidOperationException($"Не удалось добавить в архив (код {exit}).\n{stderr}");
     }
@@ -185,5 +191,83 @@ public sealed class SevenZipRunner
         proc.BeginErrorReadLine();
         await proc.WaitForExitAsync();
         return (proc.ExitCode, outSb.ToString(), errSb.ToString());
+    }
+
+    [GeneratedRegex(@"(\d{1,3})%")]
+    private static partial Regex PercentRegex();
+
+    /// <summary>
+    /// Runs 7z for a long operation, reporting the overall percentage. With "-bsp1"
+    /// 7z writes progress to stdout, updating one console line via '\r'/'\b'; we read
+    /// the stream in raw chunks, split on those control chars, and pull the percent
+    /// out of each segment. Cancellation kills the process.
+    /// </summary>
+    private async Task<(int exit, string stderr)> RunWithProgressAsync(
+        IReadOnlyList<string> args, IProgress<int>? progress, CancellationToken ct)
+    {
+        if (!EngineAvailable)
+            throw new FileNotFoundException("Движок 7z.exe не найден", ExePath);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = ExePath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            RedirectStandardInput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        if (progress is not null) psi.ArgumentList.Add("-bsp1"); // progress → stdout
+        foreach (var a in args) psi.ArgumentList.Add(a);
+
+        using var proc = new Process { StartInfo = psi };
+        var errSb = new StringBuilder();
+        proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) errSb.AppendLine(e.Data); };
+        proc.Start();
+        proc.StandardInput.Close();
+        proc.BeginErrorReadLine();
+
+        // Kill the process if the user cancels.
+        using var reg = ct.Register(() => { try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { } });
+
+        // Read stdout in raw chunks so '\r'/'\b'-refreshed progress is visible.
+        var stdout = proc.StandardOutput;
+        var buf = new char[512];
+        var seg = new StringBuilder();
+        int lastPct = -1;
+        int n;
+        while ((n = await stdout.ReadAsync(buf, 0, buf.Length)) > 0)
+        {
+            for (int k = 0; k < n; k++)
+            {
+                char c = buf[k];
+                if (c is '\r' or '\n' or '\b')
+                {
+                    ReportSegment(seg, ref lastPct, progress);
+                    seg.Clear();
+                }
+                else seg.Append(c);
+            }
+        }
+        ReportSegment(seg, ref lastPct, progress);
+
+        await proc.WaitForExitAsync(CancellationToken.None);
+        if (ct.IsCancellationRequested)
+            throw new OperationCanceledException(ct);
+        return (proc.ExitCode, errSb.ToString());
+    }
+
+    private static void ReportSegment(StringBuilder seg, ref int lastPct, IProgress<int>? progress)
+    {
+        if (progress is null || seg.Length == 0) return;
+        var m = PercentRegex().Match(seg.ToString());
+        if (!m.Success) return;
+        if (int.TryParse(m.Groups[1].Value, out int pct) && pct is >= 0 and <= 100 && pct != lastPct)
+        {
+            lastPct = pct;
+            progress.Report(pct);
+        }
     }
 }

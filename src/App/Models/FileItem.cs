@@ -1,18 +1,35 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 
 namespace Zip711.Models;
 
 public enum ItemKind { Drive, Folder, Archive, File, UpDir, Favorites }
 
-public sealed class FileItem
+public sealed class FileItem : INotifyPropertyChanged
 {
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     public string Name { get; set; } = "";
     public string FullPath { get; set; } = "";
     public ItemKind Kind { get; set; }
     public long Size { get; set; }
     public DateTimeOffset? Modified { get; set; }
+
+    // Recursively-computed size for folders, filled in on a background pass after
+    // the list appears (null = not computed yet, so nothing is shown).
+    private long? _folderSize;
+    public long? FolderSize
+    {
+        get => _folderSize;
+        set
+        {
+            if (_folderSize == value) return;
+            _folderSize = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SizeText)));
+        }
+    }
 
     /// <summary>Optional second line under the name (used to show the full path in Favorites).</summary>
     public string Subtitle { get; set; } = "";
@@ -70,9 +87,12 @@ public sealed class FileItem
     private static readonly HashSet<string> Fonts = new(StringComparer.OrdinalIgnoreCase)
     { ".ttf", ".otf", ".woff", ".woff2", ".fon" };
 
-    public string SizeText => Kind is ItemKind.Folder or ItemKind.Drive or ItemKind.UpDir or ItemKind.Favorites
-        ? ""
-        : FormatSize(Size);
+    public string SizeText => Kind switch
+    {
+        ItemKind.Folder => _folderSize is { } fs ? FormatSize(fs) : "",
+        ItemKind.Drive or ItemKind.UpDir or ItemKind.Favorites => "",
+        _ => FormatSize(Size),
+    };
 
     public string ModifiedText => Modified?.LocalDateTime.ToString("yyyy-MM-dd HH:mm") ?? "";
 
