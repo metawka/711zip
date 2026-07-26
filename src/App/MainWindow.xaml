@@ -152,8 +152,9 @@
                       IsDoubleTapEnabled="True"
                       RightTapped="OnListRightTapped"
                       AllowDrop="True"
+                      CanDragItems="True"
                       CanReorderItems="False"
-                      ContainerContentChanging="OnContainerContentChanging"
+                      DragItemsStarting="OnDragItemsStarting"
                       DragOver="OnListDragOver"
                       Drop="OnListDrop">
                 <ListView.ItemContainerStyle>

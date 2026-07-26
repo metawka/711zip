@@ -86,6 +86,7 @@ public sealed partial class MainWindow : Window
         AddAccel(VirtualKey.L, VirtualKeyModifiers.Control, (_, a) => { PathBox.Focus(FocusState.Programmatic); a.Handled = true; });
         AddAccel(VirtualKey.Left, VirtualKeyModifiers.Menu, (_, a) => { OnBack(this, null!); a.Handled = true; });
         AddAccel(VirtualKey.Right, VirtualKeyModifiers.Menu, (_, a) => { OnForward(this, null!); a.Handled = true; });
+        AddAccel(VirtualKey.Enter, VirtualKeyModifiers.Menu, (_, a) => { ShowPropertiesForSelection(); a.Handled = true; });
 
         ApplyTheme(ParseTheme(_settings.Theme));
         OpenFromCommandLine();
@@ -651,6 +652,12 @@ public sealed partial class MainWindow : Window
     {
         var ctrl = (Microsoft.UI.Input.InputKeyboardSource
             .GetKeyStateForCurrentThread(VirtualKey.Control) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+        var alt = (Microsoft.UI.Input.InputKeyboardSource
+            .GetKeyStateForCurrentThread(VirtualKey.Menu) & Windows.UI.Core.CoreVirtualKeyStates.Down) != 0;
+        // Alt+Enter opens Properties. Handle it here (the list has focus and reliably
+        // gets this KeyDown) rather than relying on the RootGrid accelerator, which the
+        // focused ListView does not forward.
+        if (e.Key == VirtualKey.Enter && alt) { ShowPropertiesForSelection(); e.Handled = true; return; }
         switch (e.Key)
         {
             case VirtualKey.Enter: ActivateItem(FileList.SelectedItem as FileItem); e.Handled = true; break;
@@ -663,6 +670,15 @@ public sealed partial class MainWindow : Window
             case VirtualKey.X when ctrl: _ = ActionClipboardAsync(cut: true); e.Handled = true; break;
             case VirtualKey.V when ctrl: _ = ActionPasteAsync(); e.Handled = true; break;
         }
+    }
+
+    // Alt+Enter: properties of the selected item, or of the current folder if none selected.
+    private void ShowPropertiesForSelection()
+    {
+        if (FileList.SelectedItem is FileItem it && it.Kind is not ItemKind.UpDir and not ItemKind.Favorites)
+            _ = ShowPropertiesAsync(it);
+        else if (_view == View.Folder && _currentDir is not null)
+            _ = ShowPropertiesAsync(new FileItem { Name = new DirectoryInfo(_currentDir).Name, FullPath = _currentDir, Kind = ItemKind.Folder });
     }
 
     // ---------- Context menu ----------
@@ -701,7 +717,7 @@ public sealed partial class MainWindow : Window
             menu.Items.Add(Mi("Переименовать", 0xE8AC, (_, _) => _ = ActionRenameAsync(), enabled: selCount == 1, accel: "F2"));
             menu.Items.Add(Mi("Удалить из архива", 0xE74D, (_, _) => _ = ActionDeleteFromArchiveAsync(), accel: "Del"));
             menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item)));
+            menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item), accel: "Alt+Enter"));
             return;
         }
 
@@ -709,7 +725,7 @@ public sealed partial class MainWindow : Window
         {
             menu.Items.Add(Mi("Убрать из избранного", 0xE8D9, (_, _) => RemoveFavorite(item)));
             menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item)));
+            menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item), accel: "Alt+Enter"));
             return;
         }
 
@@ -731,7 +747,7 @@ public sealed partial class MainWindow : Window
         }
         menu.Items.Add(Mi("В избранное", 0xE734, (_, _) => AddSelectedToFavorites()));
         menu.Items.Add(new MenuFlyoutSeparator());
-        menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item)));
+        menu.Items.Add(Mi("Свойства", 0xE946, (_, _) => _ = ShowPropertiesAsync(item), accel: "Alt+Enter"));
     }
 
     private void BuildBackgroundMenu(MenuFlyout menu)
@@ -785,17 +801,20 @@ public sealed partial class MainWindow : Window
         return string.IsNullOrEmpty(box.Password) ? null : box.Password;
     }
 
-    // Extract, prompting for a password (and retrying once) if the archive turns out
-    // to be encrypted. The working password is remembered for later operations.
-    private async Task ExtractWithPasswordAsync(string archive, string dest, IEnumerable<string>? only)
+    // Extract, prompting for a password (and retrying until correct or cancelled) if the
+    // archive turns out to be encrypted. The working password is remembered.
+    private async Task ExtractWithPasswordAsync(string archive, string dest, IEnumerable<string>? only, string? initial)
     {
-        try { await _engine.ExtractAsync(archive, dest, only, _archivePassword); }
-        catch (Exception ex) when (IsPasswordError(ex))
+        var pw = initial;
+        while (true)
         {
-            var pw = await AskPasswordAsync();
-            if (pw is null) throw new OperationCanceledException();
-            await _engine.ExtractAsync(archive, dest, only, pw);
-            _archivePassword = pw;
+            try { await _engine.ExtractAsync(archive, dest, only, pw); return; }
+            catch (Exception ex) when (IsPasswordError(ex))
+            {
+                pw = await AskPasswordAsync();
+                if (pw is null) throw new OperationCanceledException();
+                _archivePassword = pw;
+            }
         }
     }
 
@@ -827,10 +846,7 @@ public sealed partial class MainWindow : Window
             var dest = Path.Combine(Path.GetDirectoryName(archive)!, name);
 
             SetBusy(true);
-            if (_view == View.Archive)
-                await ExtractWithPasswordAsync(archive, dest, only);
-            else
-                await _engine.ExtractAsync(archive, dest, only);
+            await ExtractWithPasswordAsync(archive, dest, only, _view == View.Archive ? _archivePassword : null);
             SetBusy(false);
             await ShowInfo("Готово", $"Распаковано в:\n{dest}");
         }
@@ -1129,69 +1145,67 @@ public sealed partial class MainWindow : Window
 
     // ---------- Drag & drop ----------
 
-    // Enable per-item dragging on each container so we can supply a compact drag
-    // visual (the OS file glyph) rather than the full row snapshot.
-    private void OnContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    // Drag files/folders (or archive entries) out of the app. Uses the ListView's own
+    // DragItemsStarting — per-item ListViewItem.CanDrag never actually initiates a drag
+    // while the ListView's CanDragItems is false, which is why dragging did nothing.
+    private void OnDragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
-        if (args.ItemContainer is ListViewItem li)
-        {
-            li.CanDrag = true;
-            li.DragStarting -= OnItemDragStarting;
-            li.DragStarting += OnItemDragStarting;
-        }
-    }
-
-    private async void OnItemDragStarting(UIElement sender, DragStartingEventArgs e)
-    {
-        var origin = (sender as FrameworkElement)?.DataContext as FileItem;
-        var sel = FileList.SelectedItems.OfType<FileItem>()
+        var sel = e.Items.OfType<FileItem>()
             .Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites).ToList();
-        if (origin is not null && origin.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites
-            && !sel.Contains(origin))
-            sel = new List<FileItem> { origin };
         if (sel.Count == 0 || _view is View.Drives) { e.Cancel = true; return; }
 
         e.Data.RequestedOperation = DataPackageOperation.Copy;
 
-        // Always defer + await: resolving StorageItems (and, for archives, extracting to
-        // temp) synchronously on the UI thread deadlocks and the drag never starts.
-        var def = e.GetDeferral();
-        try
-        {
-            var items = await BuildDragStorageItemsAsync(sel);
-            if (items.Count > 0)
-            {
-                e.Data.SetStorageItems(items, readOnly: false);
-                e.DragUI.SetContentFromDataPackage(); // compact OS file icon, not the row strip
-            }
-            else e.Cancel = true;
-        }
-        catch { e.Cancel = true; }
-        finally { def.Complete(); }
-    }
-
-    private async Task<List<IStorageItem>> BuildDragStorageItemsAsync(List<FileItem> sel)
-    {
-        var list = new List<IStorageItem>();
+        // On-disk items (Folder/Favorites view) resolve synchronously and are set
+        // directly — this is the path Explorer honours as an external drop target.
+        // DragItemsStartingEventArgs has no deferral, so archive entries (which need
+        // extraction) fall back to delayed rendering.
         if (_view == View.Archive && _openArchive is not null)
         {
-            var temp = Path.Combine(Path.GetTempPath(), "711zip_drag", Guid.NewGuid().ToString("N"));
-            var include = sel.Select(i => i.Kind == ItemKind.Folder ? i.FullPath + "\\*" : i.FullPath).ToList();
-            await _engine.ExtractAsync(_openArchive, temp, include, _archivePassword);
-            foreach (var i in sel)
+            var archive = _openArchive;
+            var pw = _archivePassword;
+            e.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
             {
-                var outPath = Path.Combine(temp, i.FullPath);
-                if (i.Kind == ItemKind.Folder && Directory.Exists(outPath)) list.Add(await StorageFolder.GetFolderFromPathAsync(outPath));
-                else if (File.Exists(outPath)) list.Add(await StorageFile.GetFileFromPathAsync(outPath));
-            }
+                var def = request.GetDeferral();
+                try
+                {
+                    var items = await BuildArchiveDragItemsAsync(archive, pw, sel);
+                    request.SetData(items);
+                }
+                catch { /* drop target simply gets nothing */ }
+                finally { def.Complete(); }
+            });
         }
         else
         {
-            foreach (var i in sel)
+            var list = new List<IStorageItem>();
+            try
             {
-                if (Directory.Exists(i.FullPath)) list.Add(await StorageFolder.GetFolderFromPathAsync(i.FullPath));
-                else if (File.Exists(i.FullPath)) list.Add(await StorageFile.GetFileFromPathAsync(i.FullPath));
+                foreach (var i in sel)
+                {
+                    if (Directory.Exists(i.FullPath))
+                        list.Add(StorageFolder.GetFolderFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
+                    else if (File.Exists(i.FullPath))
+                        list.Add(StorageFile.GetFileFromPathAsync(i.FullPath).AsTask().GetAwaiter().GetResult());
+                }
             }
+            catch { /* unreadable item is simply skipped */ }
+            if (list.Count > 0) e.Data.SetStorageItems(list, readOnly: false);
+            else e.Cancel = true;
+        }
+    }
+
+    private async Task<List<IStorageItem>> BuildArchiveDragItemsAsync(string archive, string? pw, List<FileItem> sel)
+    {
+        var list = new List<IStorageItem>();
+        var temp = Path.Combine(Path.GetTempPath(), "711zip_drag", Guid.NewGuid().ToString("N"));
+        var include = sel.Select(i => i.Kind == ItemKind.Folder ? i.FullPath + "\\*" : i.FullPath).ToList();
+        await _engine.ExtractAsync(archive, temp, include, pw);
+        foreach (var i in sel)
+        {
+            var outPath = Path.Combine(temp, i.FullPath);
+            if (i.Kind == ItemKind.Folder && Directory.Exists(outPath)) list.Add(await StorageFolder.GetFolderFromPathAsync(outPath));
+            else if (File.Exists(outPath)) list.Add(await StorageFile.GetFileFromPathAsync(outPath));
         }
         return list;
     }
@@ -1262,7 +1276,7 @@ public sealed partial class MainWindow : Window
         {
             var temp = Path.Combine(Path.GetTempPath(), "711zip_view", Guid.NewGuid().ToString("N"));
             SetBusy(true);
-            await ExtractWithPasswordAsync(_openArchive, temp, new[] { item.FullPath });
+            await ExtractWithPasswordAsync(_openArchive, temp, new[] { item.FullPath }, _archivePassword);
             SetBusy(false);
             var outPath = Path.Combine(temp, item.FullPath);
             if (File.Exists(outPath)) await PreviewPathAsync(outPath, item.Name);
@@ -1278,7 +1292,7 @@ public sealed partial class MainWindow : Window
         {
             var temp = Path.Combine(Path.GetTempPath(), "711zip_view", Guid.NewGuid().ToString("N"));
             SetBusy(true);
-            await ExtractWithPasswordAsync(_openArchive, temp, new[] { item.FullPath });
+            await ExtractWithPasswordAsync(_openArchive, temp, new[] { item.FullPath }, _archivePassword);
             SetBusy(false);
             var outPath = Path.Combine(temp, item.FullPath);
             if (File.Exists(outPath)) await OpenArchiveAsync(outPath);
@@ -1372,11 +1386,15 @@ public sealed partial class MainWindow : Window
                 }
                 var text = string.Join(Environment.NewLine, lines);
                 if (more) text += Environment.NewLine + "…";
+                // AcceptsReturn MUST be set before Text: a single-line TextBox
+                // truncates an assigned value at the first line break, so setting
+                // Text first would keep only line 1 (this was the "one line" bug).
                 var tb = new TextBox
                 {
-                    Text = text, IsReadOnly = true, TextWrapping = TextWrapping.NoWrap,
-                    FontFamily = new FontFamily("Consolas"), AcceptsReturn = true,
+                    AcceptsReturn = true, IsReadOnly = true, TextWrapping = TextWrapping.NoWrap,
+                    FontFamily = new FontFamily("Consolas"),
                     Height = 480, MinWidth = 640,
+                    Text = text,
                 };
                 await ShowContentDialog(displayName, new ScrollViewer
                 {

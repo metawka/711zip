@@ -16,6 +16,12 @@ internal static class Onboarding
     public static async Task ShowAsync(XamlRoot root, bool skippable = true)
     {
         var flip = new FlipView { Width = 560, Height = 360 };
+        // Stretch each page's content host so per-page VerticalAlignment=Center can work
+        // (otherwise the content presenter sizes to content and pins it to the top).
+        var itemStyle = new Style { TargetType = typeof(FlipViewItem) };
+        itemStyle.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Stretch));
+        itemStyle.Setters.Add(new Setter(Control.VerticalContentAlignmentProperty, VerticalAlignment.Stretch));
+        flip.ItemContainerStyle = itemStyle;
         flip.Items.Add(Page(0xE7C1, "Навигация",
             "Назад и Вперёд слева вверху, или боковые кнопки мыши.",
             "Строка пути понимает ввод адреса и подсказывает папки.",
