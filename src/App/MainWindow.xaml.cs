@@ -1993,8 +1993,9 @@ public sealed partial class MainWindow : Window
 
         if (e.OriginalSource is DependencyObject d)
         {
-            // Pressed on the name text: let the ListView select on this press, and arm a
-            // drag that fires on the first move (see OnListPointerMoved).
+            // Pressed on an item (the whole row/tile is the drag handle): let the
+            // ListView select on this press, and arm a drag that fires on the first
+            // move (see OnListPointerMoved).
             if (FindDragHandle(d) is FrameworkElement handle)
             {
                 _dragPending = true;
@@ -2097,7 +2098,7 @@ public sealed partial class MainWindow : Window
     private static bool Intersects(Rect a, Rect b) =>
         a.Left <= b.Right && a.Right >= b.Left && a.Top <= b.Bottom && a.Bottom >= b.Top;
 
-    // Walk up from the pressed element to the name-text element tagged as the drag handle.
+    // Walk up from the pressed element to the item-root element tagged as the drag handle.
     private static FrameworkElement? FindDragHandle(DependencyObject? node)
     {
         while (node is not null)

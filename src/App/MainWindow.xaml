@@ -12,21 +12,23 @@
         <Grid.Resources>
             <!-- Row templates for the four view modes; the group-header template is
                  chosen automatically for Header rows by FileItemTemplateSelector.
-                 The name text is the drag handle: pressing and moving on it starts a
-                 drag instantly (StartDragAsync in code, after capturing the pointer);
-                 the rest of the row is free for marquee selection. -->
+                 The whole item is the drag handle (Tag="draghandle"): pressing and
+                 moving anywhere on it starts a drag instantly (StartDragAsync in code,
+                 after capturing the pointer). Items are content-width (containers are
+                 left-aligned, see StackItemStyle), so the empty space beside/below the
+                 items is free for marquee selection. -->
             <DataTemplate x:Key="DetailsTemplate" x:DataType="models:FileItem">
-                <Grid ColumnSpacing="12" Padding="8,0">
+                <Grid Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                      ColumnSpacing="12" Padding="8,0">
                     <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="320" />
                         <ColumnDefinition Width="{Binding SizeLen, Source={StaticResource Cols}}" />
                         <ColumnDefinition Width="{Binding ModifiedLen, Source={StaticResource Cols}}" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
                         <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" VerticalAlignment="Center"
                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                        <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
-                                    VerticalAlignment="Center" HorizontalAlignment="Left">
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Left">
                             <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis" />
                             <TextBlock Text="{x:Bind Subtitle}" Visibility="{x:Bind SubtitleVisibility}"
                                        FontSize="11" TextTrimming="CharacterEllipsis"
@@ -41,34 +43,34 @@
             </DataTemplate>
 
             <DataTemplate x:Key="ListTemplate" x:DataType="models:FileItem">
-                <StackPanel Orientation="Horizontal" Spacing="10" Padding="8,0" VerticalAlignment="Center">
+                <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                            Orientation="Horizontal" Spacing="10" Padding="8,0" VerticalAlignment="Center">
                     <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" VerticalAlignment="Center"
                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                    <TextBlock Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
-                               Text="{x:Bind Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                 </StackPanel>
             </DataTemplate>
 
             <DataTemplate x:Key="LargeIconsTemplate" x:DataType="models:FileItem">
-                <StackPanel Width="{Binding TileWidth, Source={StaticResource ViewState}}"
+                <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                            Width="{Binding TileWidth, Source={StaticResource ViewState}}"
                             Padding="4,8" HorizontalAlignment="Center" VerticalAlignment="Top">
                     <FontIcon Glyph="{x:Bind Glyph}"
                               FontSize="{Binding IconSize, Source={StaticResource ViewState}}"
                               HorizontalAlignment="Center"
                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                    <TextBlock Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
-                               Text="{x:Bind Name}" TextAlignment="Center" TextWrapping="Wrap"
+                    <TextBlock Text="{x:Bind Name}" TextAlignment="Center" TextWrapping="Wrap"
                                MaxLines="2" TextTrimming="CharacterEllipsis" HorizontalAlignment="Center"
                                Margin="0,6,0,0" Width="{Binding NameWidth, Source={StaticResource ViewState}}" />
                 </StackPanel>
             </DataTemplate>
 
             <DataTemplate x:Key="SmallIconsTemplate" x:DataType="models:FileItem">
-                <StackPanel Orientation="Horizontal" Spacing="8" Padding="6,4" VerticalAlignment="Center">
+                <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                            Orientation="Horizontal" Spacing="8" Padding="6,4" VerticalAlignment="Center">
                     <FontIcon Glyph="{x:Bind Glyph}" FontSize="18" VerticalAlignment="Center"
                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
-                    <TextBlock Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
-                               Text="{x:Bind Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                 </StackPanel>
             </DataTemplate>
 
@@ -98,10 +100,14 @@
                 <ItemsWrapGrid Orientation="Horizontal" ItemWidth="240" ItemHeight="34" />
             </ItemsPanelTemplate>
 
+            <!-- List/Details rows are left-aligned and only as wide as their content,
+                 so the empty space to the right of (and below) the rows is available to
+                 start a marquee selection instead of the row filling the whole window. -->
             <Style x:Key="StackItemStyle" TargetType="ListViewItem">
                 <Setter Property="Padding" Value="8,2" />
                 <Setter Property="MinHeight" Value="34" />
-                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                <Setter Property="HorizontalAlignment" Value="Left" />
+                <Setter Property="HorizontalContentAlignment" Value="Left" />
             </Style>
             <Style x:Key="TileItemStyle" TargetType="ListViewItem">
                 <Setter Property="Padding" Value="2" />
