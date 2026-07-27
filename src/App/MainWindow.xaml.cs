@@ -1913,21 +1913,22 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    // Ctrl+wheel resizes the icons (Explorer-style). If a non-grid mode is active it
-    // first switches to large icons, so the gesture always "does something".
+    // Ctrl+wheel cycles through the view modes (Explorer-style): wheel up moves toward
+    // large icons, wheel down toward the details table.
+    private static readonly string[] ViewCycle = { "Details", "List", "SmallIcons", "LargeIcons" };
+
     private void OnListPointerWheel(object sender, PointerRoutedEventArgs e)
     {
         if ((e.KeyModifiers & VirtualKeyModifiers.Control) == 0) return;
         int delta = e.GetCurrentPoint(FileList).Properties.MouseWheelDelta;
         e.Handled = true;
 
-        if (_settings.ViewMode != "LargeIcons")
-        {
-            if (delta > 0) { ApplyViewMode("LargeIcons", rebuild: true); _settings.Save(); }
-            return;
-        }
-        _viewState.IconSize += delta > 0 ? 8 : -8;
-        _settings.IconSize = _viewState.IconSize; _settings.Save();
+        int i = Array.IndexOf(ViewCycle, _settings.ViewMode);
+        if (i < 0) i = 0;
+        int next = Math.Clamp(i + (delta > 0 ? 1 : -1), 0, ViewCycle.Length - 1);
+        if (next == i) return;
+        ApplyViewMode(ViewCycle[next], rebuild: true);
+        _settings.Save();
     }
 
     // Keep group headers and the ".." row out of the selection no matter how they
@@ -1958,14 +1959,6 @@ public sealed partial class MainWindow : Window
     private List<FileItem> _marqueeBase = new();      // selection to keep (Ctrl/Shift additive)
     private List<FileItem> _dragSnapshot = new();     // selection at press, for multi-item drag
 
-    // A press that landed on the name text: once the pointer moves a few pixels we
-    // start the drag ourselves via StartDragAsync. Doing it programmatically avoids
-    // the framework's press-and-hold delay you get when a child CanDrag element sits
-    // inside a ListViewItem that has already captured the pointer.
-    private bool _dragHandlePending;
-    private FrameworkElement? _dragHandle;
-    private Point _dragHandleStart;
-
     // A press on the name text (the drag handle) is left to the ListView + drag system.
     // A press anywhere else on a row, or on empty space, may start a marquee — but only
     // after real movement, so a plain click still selects through the ListView.
@@ -1973,43 +1966,32 @@ public sealed partial class MainWindow : Window
     {
         _marqueePending = false;
         _marqueeActive = false;
-        _dragHandlePending = false;
-        _dragHandle = null;
         if (!e.GetCurrentPoint(FileList).Properties.IsLeftButtonPressed) return;
 
         _dragSnapshot = FileList.SelectedItems.OfType<FileItem>().ToList();
 
-        // Pressed on the name text: arm a programmatic drag, don't marquee.
-        if (e.OriginalSource is DependencyObject d && FindDragHandle(d) is FrameworkElement handle)
+        if (e.OriginalSource is DependencyObject d)
         {
-            _dragHandlePending = true;
-            _dragHandle = handle;
-            _dragHandleStart = e.GetCurrentPoint(FileList).Position;
-            return;
+            // Pressed on the name text: leave it to the ListView (selection) and the
+            // element's CanDrag (drag-out). Don't marquee, don't capture.
+            if (FindDragHandle(d) is not null) return;
+            // Leave the scrollbar alone so the list still scrolls.
+            if (FindAncestor<ScrollBar>(d) is not null) return;
         }
 
         // Pressed anywhere else on a row (or empty space): this is marquee territory,
-        // not a per-row click. Only the name selects; see OnListPointerReleased.
+        // not a per-row click. Capture the pointer to the list so the pressed
+        // ListViewItem can't swallow the moves (which stops the marquee starting) and
+        // can't keep itself selected — only the name selects. See OnListPointerReleased.
         _marqueePending = true;
         _marqueeAdditive = (e.KeyModifiers & (VirtualKeyModifiers.Control | VirtualKeyModifiers.Shift)) != 0;
         _marqueeStart = e.GetCurrentPoint(MarqueeLayer).Position;
         _marqueeBase = _marqueeAdditive ? _dragSnapshot : new List<FileItem>();
+        FileList.CapturePointer(e.Pointer);
     }
 
     private void OnListPointerMoved(object sender, PointerRoutedEventArgs e)
     {
-        // Name-handle drag: fire the drag the instant the pointer leaves the press
-        // point, so there is no hold delay.
-        if (_dragHandlePending && _dragHandle is FrameworkElement handle)
-        {
-            var hp = e.GetCurrentPoint(FileList).Position;
-            if (Math.Abs(hp.X - _dragHandleStart.X) < 4 && Math.Abs(hp.Y - _dragHandleStart.Y) < 4) return;
-            _dragHandlePending = false;
-            _dragHandle = null;
-            try { _ = handle.StartDragAsync(e.GetCurrentPoint(handle)); } catch { /* pointer already gone */ }
-            return;
-        }
-
         if (!_marqueePending && !_marqueeActive) return;
         var p = e.GetCurrentPoint(MarqueeLayer).Position;
 
@@ -2044,9 +2026,7 @@ public sealed partial class MainWindow : Window
 
     private void OnListPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        _dragHandlePending = false;
-        _dragHandle = null;
-
+        bool wasPending = _marqueePending;
         bool plainNonNameClick = _marqueePending && !_marqueeActive;
         _marqueePending = false;
 
@@ -2054,13 +2034,16 @@ public sealed partial class MainWindow : Window
         {
             _marqueeActive = false;
             MarqueeRect.Visibility = Visibility.Collapsed;
-            FileList.ReleasePointerCapture(e.Pointer);
-            return;
+        }
+        // A plain click off the name is like clicking empty space: the ListView may have
+        // selected the row under the cursor, so undo that — only the name selects.
+        else if (plainNonNameClick && !_marqueeAdditive)
+        {
+            FileList.SelectedItems.Clear();
         }
 
-        // A plain click off the name is like clicking empty space: the ListView will
-        // have selected the row under the cursor, so undo that — only the name selects.
-        if (plainNonNameClick && !_marqueeAdditive) FileList.SelectedItems.Clear();
+        // Release the capture taken in OnListPointerPressed (also fires on capture-lost).
+        if (wasPending) FileList.ReleasePointerCapture(e.Pointer);
     }
 
     private static bool Intersects(Rect a, Rect b) =>
