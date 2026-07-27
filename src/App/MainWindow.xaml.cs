@@ -1357,7 +1357,7 @@ public sealed partial class MainWindow : Window
     // (unlike DragItemsStartingEventArgs) also exposes DragUI and a real deferral, so
     // archive entries can be extracted before the drop rather than via unreliable
     // delayed rendering.
-    private void OnItemDragStarting(UIElement sender, DragStartingEventArgs args)
+    private async void OnItemDragStarting(UIElement sender, DragStartingEventArgs args)
     {
         if (sender is not FrameworkElement fe || fe.DataContext is not FileItem clicked) { args.Cancel = true; return; }
 
@@ -1371,27 +1371,29 @@ public sealed partial class MainWindow : Window
         var sel = baseSel
             .Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Drive and not ItemKind.Favorites and not ItemKind.Header)
             .ToList();
+        DragLog($"DragStarting view={_view} sel={sel.Count} first={sel.FirstOrDefault()?.Name}");
         if (sel.Count == 0 || _view is View.Drives) { args.Cancel = true; return; }
 
         args.Data.RequestedOperation = DataPackageOperation.Copy;
 
         if (_view == View.Archive && _openArchive is not null)
         {
-            // Advertise the StorageItems format synchronously (so Explorer accepts the
-            // drop) while extracting the entries lazily when the target asks for them.
+            // Extract the picked entries to a temp folder *before* the drop, holding the
+            // drag open with a deferral, then hand Explorer the real files. A delayed
+            // data provider does not work for a cross-process OLE drop — the files have
+            // to exist by the time the target reads them.
             var archive = _openArchive;
             var pw = _archivePassword;
-            args.Data.SetDataProvider(StandardDataFormats.StorageItems, async request =>
+            var deferral = args.GetDeferral();
+            try
             {
-                var def = request.GetDeferral();
-                try
-                {
-                    var built = await BuildArchiveDragItemsAsync(archive, pw, sel);
-                    request.SetData(built);
-                }
-                catch { /* target gets nothing */ }
-                finally { def.Complete(); }
-            });
+                var built = await BuildArchiveDragItemsAsync(archive, pw, sel);
+                DragLog($"archive extracted items={built.Count} -> {(built.Count > 0 ? Path.GetDirectoryName(built[0].Path) : "<none>")}");
+                if (built.Count > 0) args.Data.SetStorageItems(built, readOnly: false);
+                else args.Cancel = true;
+            }
+            catch (Exception ex) { DragLog("archive drag failed: " + ex); args.Cancel = true; }
+            finally { deferral.Complete(); }
         }
         else
         {
@@ -1412,6 +1414,15 @@ public sealed partial class MainWindow : Window
             if (list.Count > 0) args.Data.SetStorageItems(list, readOnly: false);
             else args.Cancel = true;
         }
+    }
+
+    // Lightweight drag diagnostics: appends to %TEMP%\711zip_drag.log so a failed drag
+    // can be diagnosed from a real machine (drag-drop can't be exercised by automation).
+    private static void DragLog(string msg)
+    {
+        try { File.AppendAllText(Path.Combine(Path.GetTempPath(), "711zip_drag.log"),
+            $"{DateTime.Now:HH:mm:ss.fff} {msg}{Environment.NewLine}"); }
+        catch { /* logging must never break a drag */ }
     }
 
     private async Task<List<IStorageItem>> BuildArchiveDragItemsAsync(string archive, string? pw, List<FileItem> sel)
@@ -1959,6 +1970,14 @@ public sealed partial class MainWindow : Window
     private List<FileItem> _marqueeBase = new();      // selection to keep (Ctrl/Shift additive)
     private List<FileItem> _dragSnapshot = new();     // selection at press, for multi-item drag
 
+    // Pressed on the name text: once the pointer moves we capture it and start the drag
+    // programmatically. Starting it ourselves (instead of the framework's CanDrag gesture)
+    // removes the press-and-hold delay you get when a child drag element lives inside a
+    // ListViewItem that has already grabbed the pointer.
+    private bool _dragPending;
+    private FrameworkElement? _dragHandle;
+    private Point _dragStart;
+
     // A press on the name text (the drag handle) is left to the ListView + drag system.
     // A press anywhere else on a row, or on empty space, may start a marquee — but only
     // after real movement, so a plain click still selects through the ListView.
@@ -1966,15 +1985,23 @@ public sealed partial class MainWindow : Window
     {
         _marqueePending = false;
         _marqueeActive = false;
+        _dragPending = false;
+        _dragHandle = null;
         if (!e.GetCurrentPoint(FileList).Properties.IsLeftButtonPressed) return;
 
         _dragSnapshot = FileList.SelectedItems.OfType<FileItem>().ToList();
 
         if (e.OriginalSource is DependencyObject d)
         {
-            // Pressed on the name text: leave it to the ListView (selection) and the
-            // element's CanDrag (drag-out). Don't marquee, don't capture.
-            if (FindDragHandle(d) is not null) return;
+            // Pressed on the name text: let the ListView select on this press, and arm a
+            // drag that fires on the first move (see OnListPointerMoved).
+            if (FindDragHandle(d) is FrameworkElement handle)
+            {
+                _dragPending = true;
+                _dragHandle = handle;
+                _dragStart = e.GetCurrentPoint(FileList).Position;
+                return;
+            }
             // Leave the scrollbar alone so the list still scrolls.
             if (FindAncestor<ScrollBar>(d) is not null) return;
         }
@@ -1992,6 +2019,24 @@ public sealed partial class MainWindow : Window
 
     private void OnListPointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        // Name-handle drag: the moment the pointer leaves the press point, capture it to
+        // the handle and start the drag — no hold delay. Capturing first is what makes
+        // StartDragAsync actually initiate an OS drag from here.
+        if (_dragPending && _dragHandle is FrameworkElement dh)
+        {
+            var dp = e.GetCurrentPoint(FileList).Position;
+            if (Math.Abs(dp.X - _dragStart.X) < 4 && Math.Abs(dp.Y - _dragStart.Y) < 4) return;
+            _dragPending = false;
+            _dragHandle = null;
+            try
+            {
+                dh.CapturePointer(e.Pointer);
+                _ = dh.StartDragAsync(e.GetCurrentPoint(dh));
+            }
+            catch (Exception ex) { DragLog("StartDragAsync failed: " + ex.Message); }
+            return;
+        }
+
         if (!_marqueePending && !_marqueeActive) return;
         var p = e.GetCurrentPoint(MarqueeLayer).Position;
 
@@ -2026,6 +2071,9 @@ public sealed partial class MainWindow : Window
 
     private void OnListPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        _dragPending = false;   // released without moving = a plain name click, no drag
+        _dragHandle = null;
+
         bool wasPending = _marqueePending;
         bool plainNonNameClick = _marqueePending && !_marqueeActive;
         _marqueePending = false;

@@ -12,8 +12,9 @@
         <Grid.Resources>
             <!-- Row templates for the four view modes; the group-header template is
                  chosen automatically for Header rows by FileItemTemplateSelector.
-                 The name text is the drag handle (CanDrag) so only it initiates a
-                 drag; the rest of the row is free for marquee selection. -->
+                 The name text is the drag handle: pressing and moving on it starts a
+                 drag instantly (StartDragAsync in code, after capturing the pointer);
+                 the rest of the row is free for marquee selection. -->
             <DataTemplate x:Key="DetailsTemplate" x:DataType="models:FileItem">
                 <Grid ColumnSpacing="12" Padding="8,0">
                     <Grid.ColumnDefinitions>

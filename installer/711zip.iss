@@ -57,6 +57,21 @@ Name: "{group}\711-zip File Manager"; Filename: "{app}\{#AppSub}\{#AppExe}"; Wor
 Name: "{autodesktop}\711-zip";      Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"; Tasks: desktopicon
 
 [Registry]
+; ---- Remove flat context-menu verbs left by older versions ----
+; Earlier builds registered each action as its own top-level entry, so the menu
+; showed several scattered "(711-zip)" items. Delete them first; the grouped
+; cascading submenu below replaces them.
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.open"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extracthere"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip.extractto"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.open"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extracthere"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip.extractto"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.open"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extracthere"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip.extractto"; ValueType: none; Flags: deletekey
+Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip.compress"; ValueType: none; Flags: deletekey
+
 ; ---- "Open with" registration (Screenshot_5 dialog) ----
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}"; ValueType: string; ValueName: "FriendlyAppName"; ValueData: "711-zip"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppSub}\{#AppExe},0"
@@ -75,6 +90,7 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; Val
 ; .zip
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip"; ValueType: string; ValueName: "MUIVerb"; ValueData: "711-zip"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip"; ValueType: string; ValueName: "SubCommands"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip\shell\01open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip\shell\01open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip\shell\02extracthere"; ValueType: string; ValueName: ""; ValueData: "Извлечь здесь"
@@ -85,6 +101,7 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\711zip\sh
 ; .7z
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip"; ValueType: string; ValueName: "MUIVerb"; ValueData: "711-zip"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip"; ValueType: string; ValueName: "SubCommands"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip\shell\01open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip\shell\01open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip\shell\02extracthere"; ValueType: string; ValueName: ""; ValueData: "Извлечь здесь"
@@ -95,6 +112,7 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\711zip\she
 ; .rar
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip"; ValueType: string; ValueName: "MUIVerb"; ValueData: "711-zip"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip"; ValueType: string; ValueName: "SubCommands"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip\shell\01open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip\shell\01open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip\shell\02extracthere"; ValueType: string; ValueName: ""; ValueData: "Извлечь здесь"
@@ -105,6 +123,7 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.rar\shell\711zip\sh
 ; Folders: cascading submenu (open + add to archive)
 Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip"; ValueType: string; ValueName: "MUIVerb"; ValueData: "711-zip"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppSub}\{#AppExe},0"
+Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip"; ValueType: string; ValueName: "SubCommands"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip\shell\01open"; ValueType: string; ValueName: ""; ValueData: "Открыть в 711-zip"
 Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip\shell\01open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppSub}\{#AppExe}"" ""%1"""
 Root: HKA; Subkey: "Software\Classes\Directory\shell\711zip\shell\02compress"; ValueType: string; ValueName: ""; ValueData: "Добавить в архив"
