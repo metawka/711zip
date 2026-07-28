@@ -71,7 +71,9 @@ public sealed partial class MainWindow : Window
     {
         this.InitializeComponent();
 
-        this.SystemBackdrop = new MicaBackdrop();
+        // A solid themed root background (set in XAML) is used instead of a Mica
+        // backdrop: Mica initialises a frame late, which showed a black flash on
+        // open/close. The solid background paints from the first frame.
         this.ExtendsContentIntoTitleBar = true;
         this.SetTitleBar(AppTitleBar);
         this.Title = "711-zip";
@@ -547,16 +549,60 @@ public sealed partial class MainWindow : Window
     {
         if (show)
         {
-            SearchBar.Visibility = Visibility.Visible;
             SearchBox.ItemsSource = _settings.SearchHistory;
+            SearchBar.Opacity = 0;
+            SearchXform.Y = -16;
+            SearchBar.Visibility = Visibility.Visible;
+            AnimateSearch(true, null);
             SearchBox.Focus(FocusState.Programmatic);
         }
         else
         {
-            ClearSearch();
-            FileList.Focus(FocusState.Programmatic);
+            AnimateSearch(false, () =>
+            {
+                ClearSearch();               // resets the term and hides the bar
+                FileList.Focus(FocusState.Programmatic);
+            });
         }
     }
+
+    // Slide + fade the floating search bar in/out, Win11 Notepad style.
+    private void AnimateSearch(bool show, Action? onDone)
+    {
+        var sb = new Microsoft.UI.Xaml.Media.Animation.Storyboard();
+
+        var fade = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+        {
+            To = show ? 1 : 0,
+            Duration = TimeSpan.FromMilliseconds(show ? 140 : 110),
+            EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase
+            { EasingMode = Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut },
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(fade, SearchBar);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(fade, "Opacity");
+        sb.Children.Add(fade);
+
+        var slide = new Microsoft.UI.Xaml.Media.Animation.DoubleAnimation
+        {
+            To = show ? 0 : -16,
+            Duration = TimeSpan.FromMilliseconds(show ? 160 : 110),
+            EasingFunction = new Microsoft.UI.Xaml.Media.Animation.CubicEase
+            { EasingMode = show ? Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseOut
+                                : Microsoft.UI.Xaml.Media.Animation.EasingMode.EaseIn },
+        };
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTarget(slide, SearchXform);
+        Microsoft.UI.Xaml.Media.Animation.Storyboard.SetTargetProperty(slide, "Y");
+        sb.Children.Add(slide);
+
+        if (onDone is not null) sb.Completed += (_, _) => onDone();
+        sb.Begin();
+    }
+
+    // Move initial focus off the path box so it isn't active when the app opens.
+    // Deferred so it runs after the window finishes activating (otherwise the path
+    // box, first in tab order, reclaims focus).
+    private void OnRootLoaded(object sender, RoutedEventArgs e) =>
+        DispatcherQueue.TryEnqueue(() => FileList.Focus(FocusState.Programmatic));
 
     // Reset the search term and hide the bar; used both on close and on navigation.
     private void ClearSearch()

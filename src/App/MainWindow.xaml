@@ -7,6 +7,8 @@
     xmlns:models="using:Zip711.Models">
 
     <Grid x:Name="RootGrid" RowSpacing="0" PointerPressed="OnRootPointerPressed"
+          Loaded="OnRootLoaded"
+          Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
           KeyboardAcceleratorPlacementMode="Hidden">
 
         <Grid.Resources>
@@ -18,14 +20,17 @@
                  left-aligned, see StackItemStyle), so the empty space beside/below the
                  items is free for marquee selection. -->
             <DataTemplate x:Key="DetailsTemplate" x:DataType="models:FileItem">
-                <Grid Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
-                      ColumnSpacing="12" Padding="8,0">
+                <Grid ColumnSpacing="12" Padding="8,0">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="320" />
                         <ColumnDefinition Width="{Binding SizeLen, Source={StaticResource Cols}}" />
                         <ColumnDefinition Width="{Binding ModifiedLen, Source={StaticResource Cols}}" />
                     </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                    <!-- Only the icon+name is the drag handle, so the drag preview is a
+                         compact card (not the whole row) and size/date are plain text. -->
+                    <StackPanel Grid.Column="0" Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                                Background="Transparent" Orientation="Horizontal" Spacing="12"
+                                HorizontalAlignment="Left" VerticalAlignment="Center">
                         <FontIcon Glyph="{x:Bind Glyph}" FontSize="16" VerticalAlignment="Center"
                                   Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                         <StackPanel VerticalAlignment="Center" HorizontalAlignment="Left">
@@ -44,6 +49,7 @@
 
             <DataTemplate x:Key="ListTemplate" x:DataType="models:FileItem">
                 <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                            Background="Transparent"
                             Orientation="Horizontal" Spacing="10" Padding="8,0" VerticalAlignment="Center">
                     <FontIcon Glyph="{x:Bind Glyph}" FontSize="15" VerticalAlignment="Center"
                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
@@ -53,6 +59,7 @@
 
             <DataTemplate x:Key="LargeIconsTemplate" x:DataType="models:FileItem">
                 <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                            Background="Transparent"
                             Width="{Binding TileWidth, Source={StaticResource ViewState}}"
                             Padding="4,8" HorizontalAlignment="Center" VerticalAlignment="Top">
                     <FontIcon Glyph="{x:Bind Glyph}"
@@ -67,6 +74,7 @@
 
             <DataTemplate x:Key="SmallIconsTemplate" x:DataType="models:FileItem">
                 <StackPanel Tag="draghandle" CanDrag="True" DragStarting="OnItemDragStarting"
+                            Background="Transparent"
                             Orientation="Horizontal" Spacing="8" Padding="6,4" VerticalAlignment="Center">
                     <FontIcon Glyph="{x:Bind Glyph}" FontSize="18" VerticalAlignment="Center"
                               Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
@@ -239,13 +247,22 @@
             </StackPanel>
         </Grid>
 
-        <!-- Search bar (Ctrl+F) -->
-        <Grid Grid.Row="2" x:Name="SearchBar" Padding="16,0,16,8" Visibility="Collapsed">
-            <AutoSuggestBox x:Name="SearchBox" PlaceholderText="Поиск в текущей папке…"
+        <!-- Search overlay (Ctrl+F): floats above the list (top-right) like the Win11
+             Notepad find bar, with a slide+fade animation; Esc closes it. It lives on
+             the list row so it overlaps content instead of pushing the layout. -->
+        <Border Grid.Row="4" x:Name="SearchBar" Visibility="Collapsed" Opacity="0"
+                HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0,10,24,0" Padding="8" CornerRadius="8"
+                Background="{ThemeResource AcrylicBackgroundFillColorDefaultBrush}"
+                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="SearchXform" Y="-16" />
+            </Border.RenderTransform>
+            <AutoSuggestBox x:Name="SearchBox" Width="360" PlaceholderText="Поиск в текущей папке…"
                             QueryIcon="Find"
                             TextChanged="OnSearchChanged" QuerySubmitted="OnSearchSubmitted"
                             KeyDown="OnSearchKeyDown" />
-        </Grid>
+        </Border>
 
         <ProgressBar Grid.Row="3" x:Name="Busy" IsIndeterminate="True" Visibility="Collapsed" />
 
@@ -256,10 +273,10 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <Grid Grid.Row="0" Padding="16,6,16,6" ColumnSpacing="12"
+            <Grid Grid.Row="0" Padding="16,6,16,6" ColumnSpacing="12" HorizontalAlignment="Left"
                   BorderThickness="0,0,0,1" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}">
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="320" />
                     <ColumnDefinition Width="{Binding SizeLen, Source={StaticResource Cols}}" />
                     <ColumnDefinition Width="{Binding ModifiedLen, Source={StaticResource Cols}}" />
                 </Grid.ColumnDefinitions>
