@@ -12,8 +12,8 @@
     <Product>711zip</Product>
     <AssemblyTitle>711zip</AssemblyTitle>
     <Company>metawka</Company>
-    <Version>1.0.9</Version>
-    <FileVersion>1.0.9.0</FileVersion>
+    <Version>1.0.10</Version>
+    <FileVersion>1.0.10.0</FileVersion>
     <Description>Windows 11-style front end for 7-Zip</Description>
     <Copyright>Copyright (C) 2026 metawka</Copyright>
     <ApplicationManifest>app.manifest</ApplicationManifest>

@@ -50,11 +50,17 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#PublishDir}\*"; DestDir: "{app}\{#AppSub}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
+[InstallDelete]
+; Remove the old desktop/Start-menu shortcut names from earlier versions.
+Type: files; Name: "{autodesktop}\711-zip.lnk"
+Type: files; Name: "{group}\711zip.lnk"
+Type: files; Name: "{app}\711-zip.lnk"
+
 [Icons]
 ; Clean launcher in the install root, plus Start-menu and (optional) desktop icons.
-Name: "{app}\711-zip";              Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
+Name: "{app}\711-zip File Manager";              Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
 Name: "{group}\711-zip File Manager"; Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"
-Name: "{autodesktop}\711-zip";      Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"; Tasks: desktopicon
+Name: "{autodesktop}\711-zip File Manager"; Filename: "{app}\{#AppSub}\{#AppExe}"; WorkingDir: "{app}\{#AppSub}"; Tasks: desktopicon
 
 [Registry]
 ; ---- Remove flat context-menu verbs left by older versions ----

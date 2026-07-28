@@ -1403,7 +1403,7 @@ public sealed partial class MainWindow : Window
     // (unlike DragItemsStartingEventArgs) also exposes DragUI and a real deferral, so
     // archive entries can be extracted before the drop rather than via unreliable
     // delayed rendering.
-    private async void OnItemDragStarting(UIElement sender, DragStartingEventArgs args)
+    private void OnItemDragStarting(UIElement sender, DragStartingEventArgs args)
     {
         if (sender is not FrameworkElement fe || fe.DataContext is not FileItem clicked) { args.Cancel = true; return; }
 
@@ -1420,28 +1420,12 @@ public sealed partial class MainWindow : Window
         DragLog($"DragStarting view={_view} sel={sel.Count} first={sel.FirstOrDefault()?.Name}");
         if (sel.Count == 0 || _view is View.Drives) { args.Cancel = true; return; }
 
+        // Archive drags are handled natively before StartDragAsync is ever called
+        // (StartArchiveDrag), so WinUI should never raise DragStarting in Archive view.
+        if (_view == View.Archive) { args.Cancel = true; return; }
+
         args.Data.RequestedOperation = DataPackageOperation.Copy;
 
-        if (_view == View.Archive && _openArchive is not null)
-        {
-            // Extract the picked entries to a temp folder *before* the drop, holding the
-            // drag open with a deferral, then hand Explorer the real files. A delayed
-            // data provider does not work for a cross-process OLE drop — the files have
-            // to exist by the time the target reads them.
-            var archive = _openArchive;
-            var pw = _archivePassword;
-            var deferral = args.GetDeferral();
-            try
-            {
-                var built = await BuildArchiveDragItemsAsync(archive, pw, sel);
-                DragLog($"archive extracted items={built.Count} -> {(built.Count > 0 ? Path.GetDirectoryName(built[0].Path) : "<none>")}");
-                if (built.Count > 0) args.Data.SetStorageItems(built, readOnly: false);
-                else args.Cancel = true;
-            }
-            catch (Exception ex) { DragLog("archive drag failed: " + ex); args.Cancel = true; }
-            finally { deferral.Complete(); }
-        }
-        else
         {
             var list = new List<IStorageItem>();
             // Resolve each item independently: a single unreadable entry (e.g. a
@@ -1471,19 +1455,72 @@ public sealed partial class MainWindow : Window
         catch { /* logging must never break a drag */ }
     }
 
-    private async Task<List<IStorageItem>> BuildArchiveDragItemsAsync(string archive, string? pw, List<FileItem> sel)
+    // Native virtual-file drag for Archive view: builds one ShellDrag.Entry per file
+    // (folders are flattened to their descendant files) with a lazy extractor, then runs
+    // the OLE drag. Extraction happens when the drop target reads each file, so the drag
+    // starts instantly even for multi-GB entries.
+    private void StartArchiveDrag(FileItem clicked)
     {
-        var list = new List<IStorageItem>();
-        var temp = Path.Combine(Path.GetTempPath(), "711zip_drag", Guid.NewGuid().ToString("N"));
-        var include = sel.Select(i => i.Kind == ItemKind.Folder ? i.FullPath + "\\*" : i.FullPath).ToList();
-        await _engine.ExtractAsync(archive, temp, include, pw);
+        if (_openArchive is null) return;
+
+        var current = FileList.SelectedItems.OfType<FileItem>().ToList();
+        var baseSel = current.Contains(clicked) ? current
+                    : _dragSnapshot.Contains(clicked) ? _dragSnapshot
+                    : new List<FileItem> { clicked };
+        var sel = baseSel.Where(i => i.Kind is not ItemKind.UpDir and not ItemKind.Header).ToList();
+        if (sel.Count == 0) return;
+
+        var archive = _openArchive;
+        var pw = _archivePassword;
+        var subPrefix = _archiveSubPath ?? "";
+        var baseTemp = Path.Combine(Path.GetTempPath(), "711zip_drag", Guid.NewGuid().ToString("N"));
+
+        var files = new List<ShellDrag.Entry>();
         foreach (var i in sel)
         {
-            var outPath = Path.Combine(temp, i.FullPath);
-            if (i.Kind == ItemKind.Folder && Directory.Exists(outPath)) list.Add(await StorageFolder.GetFolderFromPathAsync(outPath));
-            else if (File.Exists(outPath)) list.Add(await StorageFile.GetFileFromPathAsync(outPath));
+            if (i.Kind == ItemKind.Folder)
+            {
+                var folderPrefix = i.FullPath.TrimEnd('\\') + "\\";
+                foreach (var entry in _archiveEntries)
+                {
+                    if (entry.IsDirectory) continue;
+                    var ep = entry.Path.Replace('/', '\\');
+                    if (!ep.StartsWith(folderPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    AddArchiveDragFile(files, archive, pw, baseTemp, subPrefix, ep, entry.Size);
+                }
+            }
+            else
+            {
+                AddArchiveDragFile(files, archive, pw, baseTemp, subPrefix, i.FullPath, i.Size);
+            }
         }
-        return list;
+
+        DragLog($"native archive drag files={files.Count} first={(files.Count > 0 ? files[0].RelativeName : "<none>")}");
+        if (files.Count == 0) return;
+        try { ShellDrag.DoDrag(files); }
+        catch (Exception ex) { DragLog("native archive drag failed: " + ex); }
+    }
+
+    private void AddArchiveDragFile(List<ShellDrag.Entry> files, string archive, string? pw,
+        string baseTemp, string subPrefix, string inArchivePath, long size)
+    {
+        string rel = inArchivePath;
+        if (subPrefix.Length > 0 && rel.StartsWith(subPrefix, StringComparison.OrdinalIgnoreCase))
+            rel = rel.Substring(subPrefix.Length);
+
+        files.Add(new ShellDrag.Entry
+        {
+            RelativeName = rel,
+            Size = size,
+            // Extracts this one entry to temp (on the thread pool to avoid blocking the
+            // UI thread's own async continuation), returns the written file's path.
+            Extract = () =>
+            {
+                Task.Run(() => _engine.ExtractAsync(archive, baseTemp, new[] { inArchivePath }, pw))
+                    .GetAwaiter().GetResult();
+                return Path.Combine(baseTemp, inArchivePath);
+            },
+        });
     }
 
     private void OnListDragOver(object sender, DragEventArgs e)
@@ -2075,6 +2112,17 @@ public sealed partial class MainWindow : Window
             if (Math.Abs(dp.X - _dragStart.X) < 4 && Math.Abs(dp.Y - _dragStart.Y) < 4) return;
             _dragPending = false;
             _dragHandle = null;
+
+            // Archive: drive a native "virtual file" OLE drag so extraction happens on
+            // drop, not up front (see StartArchiveDrag). Everything else uses WinUI's
+            // StartDragAsync with real StorageItems.
+            if (_view == View.Archive && _openArchive is not null && dh.DataContext is FileItem clicked)
+            {
+                FileList.ReleasePointerCapture(e.Pointer);
+                StartArchiveDrag(clicked);
+                return;
+            }
+
             try
             {
                 dh.CapturePointer(e.Pointer);
